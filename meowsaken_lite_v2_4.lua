@@ -1,4 +1,3 @@
--- Trash Script idk ? 
 -- LPH_NO_VIRTUALIZE: khi-obf(Lunar/LPH) danh-dau-ham-nhot-chay-native;
 -- chua-obf/obf-khac: stub=no-op (mau-Catsaken)
 if not LPH_OBFUSCATED then
@@ -241,6 +240,7 @@ HDT_BLOCK_LOOKUP = {
   ["113899931890882"] = true, ["90970641235403"] = true,
 }
 
+rawset(_G, "GUEST_CHARGE_ANIMS", rawget(_G, "GUEST_CHARGE_ANIMS") or {})
 do
   local function doGuestHarvest()
     pcall(function()
@@ -248,23 +248,31 @@ do
       local assets = rs:FindFirstChild("Assets")
       if not assets then return end
 
+      local function extractAnimIds(val, outLookup)
+        if type(val) == "string" or type(val) == "number" then
+          local num = tostring(val):match("%d+")
+          if num then outLookup[num] = true end
+        elseif type(val) == "table" then
+          for _, subv in pairs(val) do extractAnimIds(subv, outLookup) end
+        elseif typeof(val) == "Instance" and val:IsA("Animation") then
+          local num = tostring(val.AnimationId):match("%d+")
+          if num then outLookup[num] = true end
+        end
+      end
+
+      local GUEST_CHARGE_ANIMS = _G.GUEST_CHARGE_ANIMS
       local function harvest(cfgMod)
         if not (cfgMod and cfgMod:IsA("ModuleScript")) then return end
         local ok, mod = pcall(require, cfgMod)
         if not (ok and type(mod) == "table" and type(mod.Animations) == "table") then return end
         for k, v in pairs(mod.Animations) do
-          if type(v) == "string" then
-            local num = v:match("%d+")
-            if num then
-              if k == "Block" then
-                HDT_BLOCK_LOOKUP[num] = true
-                if HDT_BLOCK_ANIMS and not table.find(HDT_BLOCK_ANIMS, num) then
-                  table.insert(HDT_BLOCK_ANIMS, num)
-                end
-              elseif k:find("Punch") or k:find("Parry") then
-                v32[num] = true
-              end
-            end
+          local klow = tostring(k):lower()
+          if k == "Block" or klow:find("block") then
+            extractAnimIds(v, HDT_BLOCK_LOOKUP)
+          elseif k:find("Punch") or k:find("Parry") or klow:find("punch") or klow:find("parry") then
+            extractAnimIds(v, v32)
+          elseif k:find("Charge") or k:find("Dash") or klow:find("charge") or klow:find("dash") then
+            extractAnimIds(v, GUEST_CHARGE_ANIMS)
           end
         end
       end
@@ -284,7 +292,22 @@ do
     end)
   end
   doGuestHarvest()
-  task.delay(2, doGuestHarvest)
+  task.delay(1.5, doGuestHarvest)
+  task.delay(4, doGuestHarvest)
+  local lp = game:GetService("Players").LocalPlayer
+  if lp then
+    lp.CharacterAdded:Connect(function(chr)
+      task.delay(0.5, doGuestHarvest)
+      chr:GetAttributeChangedSignal("SkinName"):Connect(function()
+        task.delay(0.2, doGuestHarvest)
+      end)
+    end)
+    if lp.Character then
+      lp.Character:GetAttributeChangedSignal("SkinName"):Connect(function()
+        task.delay(0.2, doGuestHarvest)
+      end)
+    end
+  end
 end
 
 local v33 = false
@@ -459,12 +482,16 @@ local function f4(character2)
 
   connect = animator.AnimationPlayed:Connect(function(p3)
     local animId = p3.Animation and tostring(p3.Animation.AnimationId):match("%d+")
-    if not animId then return end
+    local animName = (p3.Animation and p3.Animation.Name:lower()) or p3.Name:lower()
 
-    -- 1. HDT Body Pull on Block (Frame 0, Zero-Delay)
-    if hdtKeo and not HDT_InProgress and HDT_BLOCK_LOOKUP[animId] then
+    -- 1. HDT Body Pull on Block (Frame 0, Zero-Delay) + AutoPunch Parry Window Arm
+    local isBlock = (animId and HDT_BLOCK_LOOKUP[animId]) or animName:find("block")
+    if isBlock and _G.__NERG_PARRY_POKE then
+      task.defer(_G.__NERG_PARRY_POKE, "block-anim")
+    end
+    if hdtKeo and not HDT_InProgress and isBlock then
       if v2.get("a720Telemetry", false) then
-        print("[NERG] block-anim detected: " .. tostring(animId) .. " (HDT trigger)")
+        print("[NERG] block-anim detected: " .. tostring(animId or animName) .. " (HDT trigger)")
       end
       local myRoot = v45 or (character2 and character2:FindFirstChild("HumanoidRootPart"))
       local kf = workspaceService:FindFirstChild("Players") and workspaceService.Players:FindFirstChild("Killers")
@@ -488,7 +515,8 @@ local function f4(character2)
     end
 
     -- 2. Aim Punch on Parry / Punch (Multi-anim support with Track protection)
-    if aimPunch and v32[animId] then
+    local isPunch = (animId and v32[animId]) or animName:find("punch") or animName:find("parry")
+    if aimPunch and isPunch then
       v34 = tick()
       v33 = true
       currentAimTrack = p3
@@ -499,6 +527,15 @@ local function f4(character2)
         p3.Stopped:Once(function()
           if currentAimTrack == p3 then a724AnimUnlock() end
         end)
+      end)
+    end
+
+    -- 3. AutoCharge / ChargeAim (Immediate Frame 0 Activation via _G.NERG_CHARGE)
+    local gChargeLookup = _G.GUEST_CHARGE_ANIMS
+    local isCharge = (animId and gChargeLookup and gChargeLookup[animId]) or animName:find("charge") or animName:find("dash")
+    if isCharge and chargeAim and _G.NERG_CHARGE and _G.NERG_CHARGE.aim then
+      task.spawn(function()
+        pcall(_G.NERG_CHARGE.aim, nil, "anim-charge")
       end)
     end
   end)
@@ -960,11 +997,16 @@ do
         return
       end
 
-      local flat = Vector3.new(offset.X, 0, offset.Z)
+      local kVel = kHrp.AssemblyLinearVelocity
+      local flatVel = Vector3.new(kVel.X, 0, kVel.Z)
+      local leadT = math.clamp(offset.Magnitude / 42, 0.02, 0.18)
+      local aimPos = kHrp.Position + flatVel * leadT
+      local flat = Vector3.new(aimPos.X - myHrp.Position.X, 0, aimPos.Z - myHrp.Position.Z)
       if flat.Magnitude > 0.01 then
         hum.AutoRotate = false
-        myHrp.CFrame = CFrame.lookAt(myHrp.Position, Vector3.new(kHrp.Position.X, myHrp.Position.Y, kHrp.Position.Z))
-        hum:Move(flat.Unit)
+        pcall(function() myHrp.AssemblyAngularVelocity = Vector3.zero end)
+        myHrp.CFrame = CFrame.lookAt(myHrp.Position, Vector3.new(aimPos.X, myHrp.Position.Y, aimPos.Z))
+        hum:Move(Vector3.new(offset.X, 0, offset.Z).Unit)
       end
     end)
   end
@@ -1101,35 +1143,37 @@ local function f17(p10)
       return
     end
 
-    local function doBlockOrFallback()
-      if not character5:FindFirstChild("HumanoidRootPart") or not p10.Parent then
-        return
-      elseif not f12() then
-        if autoCharge and chargeReady() then
-          fireCharge(p10)
-        end
-        return
-      else
-        local v89 = f14(p10)
-        if not v89 then
-          return
-        end
-        if not a742pHitboxMode then
-          local magnitude = (v89 - humanoidRootPart6.Position).Magnitude
-          if magnitude > (visionRange or 13.5) * 1.18 then
-            return
-          end
-        end
-        f3()
-        v37 = tick()
-        makeTextLabel()
-      end
-    end
-
     if (blockDelay or 0) <= 0 then
-      doBlockOrFallback()
+      local v89 = f14(p10)
+      if not v89 then return end
+      if not a742pHitboxMode then
+        local magnitude = (v89 - humanoidRootPart6.Position).Magnitude
+        if magnitude > (visionRange or 13.5) * 1.18 then return end
+      end
+      f3()
+      v37 = tick()
+      makeTextLabel()
     else
-      task.delay(blockDelay, doBlockOrFallback)
+      task.delay(blockDelay, function()
+        if not character5:FindFirstChild("HumanoidRootPart") or not p10.Parent then
+          return
+        elseif not f12() then
+          if autoCharge and chargeReady() then
+            fireCharge(p10)
+          end
+          return
+        else
+          local v89 = f14(p10)
+          if not v89 then return end
+          if not a742pHitboxMode then
+            local magnitude = (v89 - humanoidRootPart6.Position).Magnitude
+            if magnitude > (visionRange or 13.5) * 1.18 then return end
+          end
+          f3()
+          v37 = tick()
+          makeTextLabel()
+        end
+      end)
     end
 
     return
@@ -1171,7 +1215,8 @@ task.spawn(function()
 
   local function isParryState()
     if not (cachedBtn and cachedBtn.Parent and cachedName and cachedCd) then return false end
-    if cachedCd.Text ~= "" then return false end
+    local cdTxt = cachedCd.Text
+    if cdTxt ~= "" and cdTxt ~= "0" and cdTxt ~= "0.0" then return false end
     if cachedBtn:GetAttribute("Parry") == true or cachedName:GetAttribute("Parry") == true then
       return true
     end
@@ -1208,7 +1253,7 @@ task.spawn(function()
     local myRoot = c:FindFirstChild("HumanoidRootPart")
     local kf = workspaceService:FindFirstChild("Players")
       and workspaceService.Players:FindFirstChild("Killers")
-    local ckRoot, bd = nil, 15
+    local ckRoot, bd = nil, 15.5
     if kf and myRoot then
       for _, k in ipairs(kf:GetChildren()) do
         local r = k:FindFirstChild("HumanoidRootPart")
@@ -1228,21 +1273,27 @@ task.spawn(function()
     end
   end
 
+  local watcherStartT = 0
   local function onParrySignal(srcTag)
-    if not autoPunch then return end
-    if not isParryState() then return end
-    tryFireParryPunch(srcTag)
+    if not __PLUS_GEN_ALIVE or not autoPunch then return end
+    if isParryState() then
+      tryFireParryPunch(srcTag)
+      if os.clock() - lastPunchAt < 0.1 then return end
+    end
+    watcherStartT = os.clock()
     if not transientWatcher then
-      local startT = os.clock()
       transientWatcher = runService.Heartbeat:Connect(function()
-        if not __PLUS_GEN_ALIVE or not autoPunch or os.clock() - startT > 0.85 or not isParryState() then
+        if not __PLUS_GEN_ALIVE or not autoPunch or os.clock() - watcherStartT > 1.35 then
           stopTransientWatcher()
           return
         end
-        tryFireParryPunch("transient")
+        if isParryState() then
+          tryFireParryPunch("transient")
+        end
       end)
     end
   end
+  rawset(_G, "__NERG_PARRY_POKE", onParrySignal)
 
   local function hookStroke(st)
     if not (st and st:IsA("UIStroke")) then return end
@@ -1251,6 +1302,9 @@ task.spawn(function()
     end)
     parryConns[#parryConns + 1] = st:GetPropertyChangedSignal("Enabled"):Connect(function()
       onParrySignal("stroke-enabled")
+    end)
+    parryConns[#parryConns + 1] = st:GetPropertyChangedSignal("Transparency"):Connect(function()
+      onParrySignal("stroke-trans")
     end)
   end
 
@@ -1261,6 +1315,9 @@ task.spawn(function()
     pcall(function()
       parryConns[#parryConns + 1] = btn:GetPropertyChangedSignal("BackgroundColor3"):Connect(function()
         onParrySignal("btn-bg")
+      end)
+      parryConns[#parryConns + 1] = btn.AttributeChanged:Connect(function()
+        onParrySignal("btn-attr")
       end)
       if btn:IsA("ImageButton") then
         parryConns[#parryConns + 1] = btn:GetPropertyChangedSignal("ImageColor3"):Connect(function()
@@ -1275,6 +1332,16 @@ task.spawn(function()
       if nameLbl and nameLbl:IsA("TextLabel") then
         parryConns[#parryConns + 1] = nameLbl:GetPropertyChangedSignal("TextColor3"):Connect(function()
           onParrySignal("name-col")
+        end)
+        parryConns[#parryConns + 1] = nameLbl.AttributeChanged:Connect(function()
+          onParrySignal("name-attr")
+        end)
+      end
+      if cdLbl and cdLbl:IsA("TextLabel") then
+        parryConns[#parryConns + 1] = cdLbl:GetPropertyChangedSignal("Text"):Connect(function()
+          if cdLbl.Text == "" or cdLbl.Text == "0" then
+            onParrySignal("cd-ready")
+          end
         end)
       end
       for _, ch in ipairs(btn:GetDescendants()) do
@@ -1412,12 +1479,18 @@ local function visRotY(v, ang)
   return Vector3.new(v.X * c + v.Z * s, 0, -v.X * s + v.Z * c)
 end
 local a742uVisAcc = 0
-a742uVisConn = runService.RenderStepped:Connect(function(delta930)
+local setVisLoop
+local a742uVisStep = function(delta930)
   if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED then
     if a742uVisConn then a742uVisConn:Disconnect() a742uVisConn = nil end
     return
   end
-  if not default or not localPlayer.Character then
+  if not default then
+    if visUsed > 0 then visHideAll() end
+    if setVisLoop then setVisLoop(false) end
+    return
+  end
+  if not localPlayer.Character then
     if visUsed > 0 then visHideAll() end
     return
   end
@@ -1500,7 +1573,18 @@ a742uVisConn = runService.RenderStepped:Connect(function(delta930)
       placeDot(apex + arc, cColor, dotTrans, dotSize)
     end
   end
-end)
+end
+setVisLoop = function(on)
+  if on and not a742uVisConn then
+    a742uVisAcc = 0
+    a742uVisConn = runService.RenderStepped:Connect(a742uVisStep)
+  elseif not on and a742uVisConn then
+    a742uVisConn:Disconnect()
+    a742uVisConn = nil
+    if visUsed > 0 then visHideAll() end
+  end
+end
+if default then setVisLoop(true) end
 
 BLOCKABLE_ATTACKS = { "slash", "enragedslash", "stab", "attack", "punch", "swing", "golemslash" }
 local function f19(animType3, p11)
@@ -1556,15 +1640,11 @@ local function f19(animType3, p11)
     if v98 > v102 * v102 then
       return
     elseif v8 then
-      local v103, v104 = pcall(function()
-        local dot3 = humanoidRootPart8.CFrame.LookVector:Dot((humanoidRootPart7.Position
-          - humanoidRootPart8.Position).Unit)
-
-        local v105 = math.cos(math.rad(visionAngle / 2))
-        return v98 < 25 or dot3 >= v105
-      end)
-
-      if not v103 or not v104 then
+      local toPlayer = humanoidRootPart7.Position - humanoidRootPart8.Position
+      local flatUnit = toPlayer.Magnitude > 0.001 and toPlayer.Unit or humanoidRootPart8.CFrame.LookVector
+      local dot3 = humanoidRootPart8.CFrame.LookVector:Dot(flatUnit)
+      local v105 = math.cos(math.rad(visionAngle / 2))
+      if not (v98 < 25 or dot3 >= v105) then
         return
       end
     end
@@ -1844,6 +1924,19 @@ local function GetAnimationType(ID)
 end
 animEarConns = {}
 a742pSndTouch, a742pSndConns, a742pCharConns = {}, {}, {}
+local function unmountAnimEar(k)
+  if k then
+    if animEarConns[k] then pcall(function() animEarConns[k]:Disconnect() end) animEarConns[k] = nil end
+    if a742pCharConns[k] then pcall(function() a742pCharConns[k]:Disconnect() end) a742pCharConns[k] = nil end
+  end
+  for s, c0 in pairs(a742pSndConns) do
+    if not s.Parent or not s:IsDescendantOf(workspaceService) or (k and s:IsDescendantOf(k)) then
+      pcall(function() c0:Disconnect() end)
+      a742pSndConns[s] = nil
+      a742pSndTouch[s] = nil
+    end
+  end
+end
 local function mountAnimEar(k)
   if k:GetAttribute("__A641_ANIM_EAR") then return end
   local hum = k:FindFirstChildOfClass("Humanoid")
@@ -1857,7 +1950,7 @@ local function mountAnimEar(k)
       A663_LOG("ANIM-FIRE", aid, k.Name, "anim-m1")
       local nowL = os.clock()
       for s, t0 in pairs(a742pSndTouch) do
-        if not s.Parent then
+        if not s.Parent or not s:IsDescendantOf(workspaceService) then
           a742pSndTouch[s] = nil
           local c0 = a742pSndConns[s]
           if c0 then pcall(function() c0:Disconnect() end) a742pSndConns[s] = nil end
@@ -1882,8 +1975,9 @@ local function mountAnimEar(k)
   end
   for _, d in ipairs(k:GetDescendants()) do hookSound(d) end
   a742pCharConns[k] = k.DescendantAdded:Connect(function(d)
-    task.wait(0.05)
-    hookSound(d)
+    if d:IsA("Sound") then
+      task.defer(hookSound, d)
+    end
   end)
 end
 local function f22()
@@ -1899,8 +1993,12 @@ local function f22()
     end
     for _, k in ipairs(killers3:GetChildren()) do pcall(mountAnimEar, k) end
     killers3.ChildAdded:Connect(function(child)
+      if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED then return end
       task.wait(0.1)
       if child.Parent then pcall(mountAnimEar, child) end
+    end)
+    killers3.ChildRemoved:Connect(function(child)
+      pcall(unmountAnimEar, child)
     end)
   end)
 end
@@ -1925,9 +2023,13 @@ function a742pSpawnBox(k)
   if not hrp then return end
   local base = (k.Name or ""):gsub("^[!#]", "")
   local now = os.clock()
+  local a742pB = A742P_SIZES[base] or A742P_FALLBACK
+  local targetSize = Vector3.new(a742pB.X * (a742pWidScale or 1), a742pB.Y, a742pB.Z * (a742pLenScale or 1))
   local b = a742pBoxes[k]
   if b and b.part and b.part.Parent then
     b.untilT = now + 0.55
+    b.part.Size = targetSize
+    if b.hl then b.hl.Size = targetSize end
     if b.firedAt and now - b.firedAt >= 0.5 then b.fired, b.firedAt = nil, nil end
     return
   end
@@ -1936,16 +2038,16 @@ function a742pSpawnBox(k)
   part.Anchored, part.CanCollide, part.CanTouch, part.CanQuery, part.CastShadow = true, false, false, false, false
   part.Material = Enum.Material.ForceField
   part.Color = A742P_COLOR
-  part.Transparency = 0.15
-  local a742pB = A742P_SIZES[base] or A742P_FALLBACK
-  part.Size = Vector3.new(a742pB.X * (a742pWidScale or 1), a742pB.Y, a742pB.Z * (a742pLenScale or 1))
-  local hl = Instance.new("Highlight")
+  part.Transparency = 0.25
+  part.Size = targetSize
+  local hl = Instance.new("BoxHandleAdornment")
   hl.Name = "NergABOutline"
-  hl.FillColor = A742P_COLOR
-  hl.FillTransparency = 0.7
-  hl.OutlineTransparency = 0
-  hl.OutlineColor = A742P_OUTLINE
-  hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+  hl.Adornee = part
+  hl.Size = targetSize
+  hl.Color3 = A742P_OUTLINE
+  hl.Transparency = 0.55
+  hl.AlwaysOnTop = true
+  hl.ZIndex = 5
   hl.Parent = part
   part.Parent = a742pFolder
   a742pBoxes[k] = { part = part, hl = hl, untilT = now + 0.55, zoff = A742P_ZOFF[base] or -1.2, baseZ = a742pB.Z, fired = nil, firedAt = nil }
@@ -1968,7 +2070,7 @@ function a742pSpawnBox(k)
             local pos = h9.Position + flat * (bb.zoff + 2 + (bb.part.Size.Z - (bb.baseZ or bb.part.Size.Z)) / 2)
             bb.part.CFrame = CFrame.lookAt(pos, pos + flat)
             local touches = #workspaceService:GetPartsInPart(bb.part, a742pOverlap) > 0
-            bb.hl.OutlineColor = touches and VIS_RED or A742P_OUTLINE
+            bb.hl.Color3 = touches and VIS_RED or A742P_OUTLINE
             if touches and not bb.fired then
               bb.fired = true
               bb.firedAt = now2
@@ -2503,13 +2605,29 @@ do
 		return tbl15
 	end
 
+	local function extractFirstAnimId(val, depth)
+		if (depth or 0) > 3 or val == nil then return nil end
+		if typeof(val) == "Instance" and val:IsA("Animation") then
+			return string.match(tostring(val.AnimationId), "%d+")
+		elseif type(val) == "string" or type(val) == "number" then
+			return string.match(tostring(val), "%d+")
+		elseif type(val) == "table" then
+			for _, subv in pairs(val) do
+				local id = extractFirstAnimId(subv, (depth or 0) + 1)
+				if id then return id end
+			end
+		end
+		return nil
+	end
+
 	local function fn20(arg, arg2)
 		if arg:GetAttribute("FootstepOverride") == "GolemFootsteps" then
 			return true
 		end
 
-		if arg2 and arg2.AbilityState and arg2.AbilityState.Animator then
-			for _, v3 in ipairs(arg2.AbilityState.Animator:GetPlayingAnimationTracks()) do
+		local tracks = (arg2 and arg2._frameTracks) or (arg2 and arg2.AbilityState and arg2.AbilityState.Animator and arg2.AbilityState.Animator:GetPlayingAnimationTracks())
+		if tracks then
+			for _, v3 in ipairs(tracks) do
 				if v3.Animation and v3.Animation.AnimationId then
 					if tostring(v3.Animation.AnimationId):lower():find("golem") then
 						return true
@@ -2526,66 +2644,63 @@ do
 			return { MaxStamina = 50, StaminaGain = 20, StaminaLoss = 10, MinStamina = 0, PenaltyTime = 2 }
 		end
 		local str2 = arg.Parent and arg.Parent.Name == "Survivors" and "Survivors" or "Killers"
-		local name = arg.Name
+		local name = (arg:GetAttribute("CharacterName") or arg.Name):gsub("^[!#]", "")
 		if str2 == "Survivors" then
 			return tbl10
 		end
-		local v3 = fn16({ "Killers", name, "Config" })
+		local v3 = fn16({ "Killers", name, "Config" }) or fn16({ "Killers", arg.Name, "Config" })
 
 		if v3 then
 			return {
-				MaxStamina = v3.MaxStamina or 100,
-				StaminaGain = v3.StaminaGain or 20,
-				StaminaLoss = v3.StaminaLoss or 10,
+				MaxStamina = v3.MaxStamina or 110,
+				StaminaGain = v3.StaminaGain or 21,
+				StaminaLoss = v3.StaminaLoss or 9.5,
 				MinStamina = 0,
 				PenaltyTime = 2,
 			}
 		end
 
-		return tbl10
+		return { MaxStamina = 110, StaminaGain = 21, StaminaLoss = 9.5, MinStamina = 0, PenaltyTime = 2 }
 	end
 
 	local function fn22(arg, arg2, arg3)
 		local str2 = arg.Parent and arg.Parent.Name == "Survivors" and "Survivors" or "Killers"
-		local name = arg.Name
+		local name = (arg:GetAttribute("CharacterName") or arg.Name):gsub("^[!#]", "")
 		local attribute = arg:GetAttribute("SkinName") or ""
 		local str3 = arg3 and "GolemRun" or arg2 and "InjuredRun" or "Run"
 
 		if attribute ~= "" then
 			local v3 = fn16({ "Skins", str2, name, attribute, "Config" })
-			if v3 and v3.Animations and v3.Animations[str3] then
-				return v3.Animations[str3]
-			end
+			local idS = v3 and v3.Animations and extractFirstAnimId(v3.Animations[str3], 0)
+			if idS then return idS end
 		end
 
-		local v3 = fn16({ str2, name, "Config" })
-		if v3 and v3.Animations and v3.Animations[str3] then
-			return v3.Animations[str3]
-		end
+		local v3 = fn16({ str2, name, "Config" }) or fn16({ str2, arg.Name, "Config" })
+		local idB = v3 and v3.Animations and extractFirstAnimId(v3.Animations[str3], 0)
+		if idB then return idB end
 
 		if arg3 then
-			return "rbxassetid://130480436367274"
+			return "130480436367274"
 		end
 
 		if arg2 then
-			local v4 = fn16({ str2, name, "Config" })
-			if v4 and v4.Animations and v4.Animations.Run then
-				return v4.Animations.Run
-			end
+			local idR = v3 and v3.Animations and extractFirstAnimId(v3.Animations.Run, 0)
+			if idR then return idR end
 		end
 
-		return arg2 and "rbxassetid://115946474977409" or "rbxassetid://136252471123500"
+		return arg2 and "115946474977409" or "136252471123500"
 	end
 
-	local function fn23(arg, arg2)
-		if not arg then
+	local function fn23(arg, arg2, cachedTracks)
+		if not arg and not cachedTracks then
 			return false
 		end
 
-		for _, v3 in ipairs(arg:GetPlayingAnimationTracks()) do
+		local tracks = cachedTracks or arg:GetPlayingAnimationTracks()
+		for _, v3 in ipairs(tracks) do
 			if v3.Animation and v3.Animation.AnimationId then
 				local v4 = string.match(tostring(v3.Animation.AnimationId), "%d+")
-				if arg2 and v4 == arg2 and v3.WeightCurrent > 0.45 then
+				if arg2 and v4 == arg2 and v3.WeightCurrent > 0.35 then
 					return true
 				end
 			end
@@ -2602,6 +2717,13 @@ do
 	end
 
 	local function fn25(arg)
+		local myCh = localPlayer and localPlayer.Character
+		if myCh and myCh.Parent and myCh.Parent.Name == "Survivors" then
+			local myHrp = myCh:FindFirstChild("HumanoidRootPart")
+			if myHrp and (myHrp.Position - arg).Magnitude <= n4 then
+				return true
+			end
+		end
 		for k, v3 in pairs(tbl8) do
 			if v3.Type == "Survivor" and k.Parent then
 				local humanoidRootPart = k:FindFirstChild("HumanoidRootPart")
@@ -2979,6 +3101,10 @@ do
 			arg3 = 0.016666666666666666
 		end
 
+		local animator = arg2.AbilityState and arg2.AbilityState.Animator
+		local frameTracks = animator and animator:GetPlayingAnimationTracks() or nil
+		arg2._frameTracks = frameTracks
+
 		local attribute = arg:GetAttribute("FootstepOverride")
 		local v3 = fn20(arg, arg2)
 		local flag2 = attribute == "GolemFootsteps" or v3
@@ -3018,8 +3144,8 @@ do
 		local isGolem = arg2.IsGolem
 		arg2.IsStaminaFrozen = false
 
-		if isGolem and arg2.AbilityState and arg2.AbilityState.Animator then
-			for _, v4 in ipairs(arg2.AbilityState.Animator:GetPlayingAnimationTracks()) do
+		if isGolem and frameTracks then
+			for _, v4 in ipairs(frameTracks) do
 				local name = v4.Animation and v4.Animation.Name or ""
 				if name:match("GolemShockwave") or name:match("Blooming") then
 					arg2.IsStaminaFrozen = true
@@ -3065,18 +3191,16 @@ do
 		end
 
 		local flag4 = arg2.CurrentSpeed > 0.4
-		local animator = arg2.AbilityState and arg2.AbilityState.Animator
 		local flag5 = false
 
-		if animator then
-			flag5 = fn23(arg2.AbilityState.Animator, golemRunAnimationIdStr)
+		if frameTracks then
+			flag5 = fn23(animator, golemRunAnimationIdStr, frameTracks)
 		end
 
-		local animator2 = arg2.Sk8SkatingAnimId and arg2.AbilityState and arg2.AbilityState.Animator
 		local isSkating = false
 
-		if animator2 then
-			isSkating = fn23(arg2.AbilityState.Animator, arg2.Sk8SkatingAnimId)
+		if arg2.Sk8SkatingAnimId and frameTracks then
+			isSkating = fn23(animator, arg2.Sk8SkatingAnimId, frameTracks)
 		end
 
 		arg2.IsSkating = isSkating
@@ -3088,7 +3212,9 @@ do
 			n7 = 1.35
 		end
 
-		isSkating = isSkating or flag5 and flag4
+		local sprintSpeedFloor = (arg2.Type == "Killer") and 20.5 or 19.0
+		local isMovingSprintSpeed = (arg2.CurrentSpeed >= sprintSpeedFloor) or (arg2.Hum ~= nil and arg2.Hum.WalkSpeed >= 22 and arg2.CurrentSpeed >= 15)
+		isSkating = isSkating or ((flag5 or isMovingSprintSpeed) and flag4)
 
 		if arg2.Type == "Killer" and isSkating and not fn25(position) then
 			isSkating = false
@@ -3098,11 +3224,11 @@ do
 			local enragedAnimIds = arg2.AbilityState and arg2.AbilityState.EnragedAnimIds
 			local flag6 = false
 
-			if enragedAnimIds then
-				for _, v5 in ipairs(arg2.AbilityState.Animator:GetPlayingAnimationTracks()) do
+			if enragedAnimIds and frameTracks then
+				for _, v5 in ipairs(frameTracks) do
 					if v5.Animation and v5.Animation.AnimationId then
 						local v6 = string.match(tostring(v5.Animation.AnimationId), "%d+")
-						if v6 and arg2.AbilityState.EnragedAnimIds[v6] then
+						if v6 and enragedAnimIds[v6] then
 							flag6 = true
 							break
 						end
@@ -3115,6 +3241,7 @@ do
 			end
 		end
 
+		arg2._frameTracks = nil
 		local maxStamina = arg2.Stats.MaxStamina
 
 		if arg2.IsEnraged and arg2.Name == "Slasher" then
@@ -3133,7 +3260,7 @@ do
 			arg2.MovementState = arg2.IsInjured and "INJURED_RUN" or "RUN"
 
 			if not arg2.IsStaminaFrozen then
-				arg2.TimeUntilRecovery = math.clamp(arg2.TimeUntilRecovery + arg3 * 0.05, 0.2, 3)
+				arg2.TimeUntilRecovery = 1.0
 				arg2.CurrentStamina = math.clamp(arg2.CurrentStamina - arg2.Stats.StaminaLoss * n7 * arg3, arg2.Stats.MinStamina, maxStamina)
 
 				if arg2.CurrentStamina <= arg2.Stats.MinStamina then
@@ -3144,7 +3271,7 @@ do
 			end
 		else
 			if arg2.IsSprinting == true then
-				arg2.TimeUntilRecovery = math.max(arg2.TimeUntilRecovery, 0.11)
+				arg2.TimeUntilRecovery = math.max(arg2.TimeUntilRecovery, 1.0)
 			end
 
 			arg2.IsSprinting = false
@@ -3504,16 +3631,11 @@ end
 		end
 	end
 	rawset(_G, "__A723_TOKEN", {})
-	local a723MyTok = _G.__A723_TOKEN
-	task.spawn(function()
-		while _G.__A723_TOKEN == a723MyTok do
-			task.wait(0.3)
-			pcall(function()
-				local n = tbl.EspIconSize or 50
-				local nd = math.clamp(math.floor(n * 0.48 + 0.5), 12, 64)
-				a723IconSweep(n, nd)
-			end)
-		end
+	-- [r44 Event-Driven] Quét khởi tạo 1 lần duy nhất, sau đó chỉ cập nhật khi Slider thay đổi
+	pcall(function()
+		local n = tbl.EspIconSize or 50
+		local nd = math.clamp(math.floor(n * 0.48 + 0.5), 12, 64)
+		a723IconSweep(n, nd)
 	end)
 	ESP_SET = {
 		killer = function(v)
@@ -3577,11 +3699,39 @@ end
 				tbl.PlayersTagsEsp = v and true or false
 				if v then
 					StartESPSystem()
+					if not forsakenDeviceESP then
+						forsakenDeviceESP = CoreGui:FindFirstChild("ForsakenDeviceESP") or Instance.new("ScreenGui")
+						forsakenDeviceESP.Name = "ForsakenDeviceESP"
+						forsakenDeviceESP:SetAttribute("GEN", 4)
+						forsakenDeviceESP.DisplayOrder = 10
+						forsakenDeviceESP.Parent = (gethui and gethui()) or CoreGui
+					end
+					local plFolder = workspace:FindFirstChild("Players")
+					if plFolder then
+						for _, teamName in ipairs({ "Killers", "Survivors" }) do
+							local tf = plFolder:FindFirstChild(teamName)
+							if tf then
+								for _, ch in ipairs(tf:GetChildren()) do
+									if ch:IsA("Model") and ch ~= localPlayer.Character and not tbl7[ch] then
+										local hrp = ch:FindFirstChild("HumanoidRootPart")
+										local hum = ch:FindFirstChildOfClass("Humanoid")
+										if hrp and hum then
+											CreatePlayerTagDrawing(ch, teamName == "Killers" and tbl.EspKillerColor or tbl.EspSurvivorsColor, hrp, hum)
+										end
+									end
+								end
+							end
+						end
+					end
 				elseif not _G.NERG_ABILITY_ESP then
 					StopESPSystem()
 				else
-					for k in pairs(tbl7) do RemovePlayerTagDrawing(k) end
-					tbl8 = {}
+					for k, v3 in pairs(tbl7) do
+						pcall(function() v3.MainText:Remove() end)
+						pcall(function() v3.SubText:Remove() end)
+						if v3.DeviceGuiFrame then pcall(function() v3.DeviceGuiFrame:Destroy() end) end
+						tbl7[k] = nil
+					end
 					if forsakenDeviceESP then forsakenDeviceESP:Destroy() forsakenDeviceESP = nil end
 				end
 			end)
@@ -3622,6 +3772,7 @@ end
 			n = math.clamp(math.floor(tonumber(n) or 50), 16, 120)
 			tbl.EspIconSize = n
 			local nd = math.clamp(math.floor(n * 0.48 + 0.5), 12, 64)
+			pcall(a723IconSweep, n, nd)
 			for _, st in pairs(tbl8) do
 				local ab = st.AbilityState
 				if ab and ab.Frames then
@@ -3728,7 +3879,7 @@ end
 			end
 		end
 	end)
-	task.spawn(function() while true do if _G.__NERG_KILLED then break end task.wait(2) pcall(purgeOldESP) end end)
+	task.spawn(function() while true do if _G.__NERG_KILLED or not __PLUS_GEN_ALIVE then break end task.wait(2) pcall(purgeOldESP) end end)
 	if tbl.PlayersTagsEsp then StartESPSystem() end
 	local function isOurHL(d)
 		return d:IsA("Highlight") and (d:GetAttribute("NergHL") == true or d.Name == "External_Protected_HL" or d.Name == tostring(_G.__NERG_HL_NAME))
@@ -3747,23 +3898,34 @@ end
 			local mp = workspace:FindFirstChild("Map")
 			local ig = mp and mp:FindFirstChild("Ingame")
 			if ig then
-				for _, d in ipairs(ig:GetDescendants()) do
-					if isOurHL(d) then pcall(function() d:Destroy() end) end
+				for _, ch in ipairs(ig:GetChildren()) do
+					if isOurHL(ch) then
+						pcall(function() ch:Destroy() end)
+					elseif ch:IsA("Model") or ch:IsA("Folder") then
+						for _, d in ipairs(ch:GetChildren()) do
+							if isOurHL(d) then pcall(function() d:Destroy() end) end
+						end
+					end
 				end
 			end
 		end
 	end
-	local lastK5, lastS5
+	local lastK5, lastS5, lastIng5 = nil, nil, nil
 	task.spawn(function()
 		while true do
-			if _G.__NERG_KILLED then break end
+			if _G.__NERG_KILLED or not __PLUS_GEN_ALIVE then break end
 			task.wait(5)
 			pcall(function()
-				if tbl.KillerEsp then pcall(killerEsp) else pcall(nergEspSweepTeam, "Killers") end
-				if tbl.SurvivorsEsp then pcall(survivorsEsp) else pcall(nergEspSweepTeam, "Survivors") end
-				if tbl.KillerEsp ~= lastK5 or tbl.SurvivorsEsp ~= lastS5 then
-					lastK5, lastS5 = tbl.KillerEsp, tbl.SurvivorsEsp
-					pcall(function() if v2.get("a720Telemetry", false) then print("[NERG] esp state: K=" .. tostring(tbl.KillerEsp) .. " S=" .. tostring(tbl.SurvivorsEsp) .. " (changed)") end end)
+				local curIng = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Ingame")
+				local ingChanged = (curIng ~= lastIng5)
+				lastIng5 = curIng
+				if tbl.KillerEsp ~= lastK5 or (tbl.KillerEsp and ingChanged) then
+					lastK5 = tbl.KillerEsp
+					if tbl.KillerEsp then pcall(killerEsp) else pcall(nergEspSweepTeam, "Killers") end
+				end
+				if tbl.SurvivorsEsp ~= lastS5 or (tbl.SurvivorsEsp and ingChanged) then
+					lastS5 = tbl.SurvivorsEsp
+					if tbl.SurvivorsEsp then pcall(survivorsEsp) else pcall(nergEspSweepTeam, "Survivors") end
 				end
 			end)
 		end
@@ -3812,7 +3974,19 @@ do
 			end,
 			radius = function(d)
 				local name = d.Name
-				if name == "GroundBulbModel" or name == "GroundBulb" then return 20 end
+				if name == "GroundBulbModel" or name == "GroundBulb" then
+					local r = 45
+					local kf = workspace:FindFirstChild("Players") and workspace.Players:FindFirstChild("Killers")
+					if kf then
+						local az = kf:FindFirstChild("Azure")
+						local azHrp = az and az:FindFirstChild("HumanoidRootPart")
+						local bPart = d:FindFirstChildWhichIsA("BasePart", true)
+						if azHrp and bPart and (azHrp.Position - bPart.Position).Magnitude > 70 then
+							r = 60
+						end
+					end
+					return r
+				end
 				if name == "VineModel" then return 20 end
 				return nil
 			end },
@@ -3827,12 +4001,17 @@ do
 	local rs = game:GetService("RunService")
 
 	local function baseOf(d)
-		if d:IsA("Model") then return d.PrimaryPart or d:FindFirstChildWhichIsA("BasePart") end
+		if not d then return nil end
+		if d:IsA("Model") then return d.PrimaryPart or d:FindFirstChildWhichIsA("BasePart", true) end
+		if d:IsA("Tool") then
+			return d:FindFirstChild("ItemRoot", true) or d:FindFirstChild("Handle", true) or d:FindFirstChildWhichIsA("BasePart", true)
+		end
 		if d:IsA("BasePart") then return d end
 		return nil
 	end
 
 	local function findEntry(d)
+		if not (d:IsA("Model") or d:IsA("BasePart")) then return nil end
 		for _, e in ipairs(REG) do
 			local ok, res = pcall(e.match, d)
 			if ok and res then return e end
@@ -3841,6 +4020,10 @@ do
 	end
 
 	local function applyHL(target, color)
+		local adornee = target
+		if target:IsA("Tool") then
+			adornee = baseOf(target) or target
+		end
 		local hl = target:FindFirstChild(HLNAME)
 		if not hl then
 			hl = Instance.new("Highlight")
@@ -3848,9 +4031,9 @@ do
 			hl.FillTransparency = 0.45
 			hl.OutlineTransparency = 0
 			hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-			hl.Adornee = target
 			hl.Parent = target
 		end
+		hl.Adornee = adornee
 		hl.FillColor = color
 		hl.OutlineColor = color
 		return hl
@@ -3872,6 +4055,7 @@ do
 		local rec = items[tool]
 		if not rec then return end
 		if rec.hl then pcall(function() rec.hl:Destroy() end) end
+		if rec.box then pcall(function() rec.box:Destroy() end) end
 		if rec.tag then pcall(function() rec.tag.Remove() end) end
 		items[tool] = nil
 	end
@@ -3933,7 +4117,7 @@ do
 	end
 
 	local function applyItem(tool)
-		local active = OBJ.master and OBJ.itemsOn and ITEM_MATCH[tool.Name] == true
+		local active = OBJ.itemsOn and ITEM_MATCH[tool.Name] == true
 		local rec = items[tool]
 		if not active then
 			if rec then rmItem(tool) end
@@ -3943,7 +4127,24 @@ do
 			rec = {}
 			items[tool] = rec
 		end
+		local bp = baseOf(tool)
+		rec.bp = bp
 		rec.hl = applyHL(tool, OBJ.colors.Items)
+		if bp then
+			local box = tool:FindFirstChild("NP_ItemBox")
+			if not box then
+				box = Instance.new("BoxHandleAdornment")
+				box.Name = "NP_ItemBox"
+				box.AlwaysOnTop = true
+				box.ZIndex = 7
+				box.Transparency = 0.45
+				box.Parent = tool
+			end
+			box.Adornee = bp
+			box.Size = bp.Size + Vector3.new(0.25, 0.25, 0.25)
+			box.Color3 = OBJ.colors.Items
+			rec.box = box
+		end
 		if OBJ.tagsOn then
 			if not rec.tag then rec.tag = forsakenFK.textTag() end
 			rec.tag.Text = tool.Name
@@ -3969,14 +4170,19 @@ do
 		detachConns()
 		if not ingame then return end
 		conns.added = ingame.DescendantAdded:Connect(function(d)
+			if not (d:IsA("Model") or d:IsA("Tool") or d:IsA("BasePart")) then return end
 			task.defer(function()
 				if not d.Parent then return end
-				local e = findEntry(d)
-				if e then
-					applyReg(d, e)
+				if (d:IsA("Tool") or d:IsA("Model")) and ITEM_MATCH[d.Name] == true then
+					applyItem(d)
 					return
 				end
-				if d:IsA("Tool") and ITEM_MATCH[d.Name] == true then applyItem(d) end
+				if d:IsA("BasePart") and d.Parent and ITEM_MATCH[d.Parent.Name] == true then
+					applyItem(d.Parent)
+					return
+				end
+				local e = findEntry(d)
+				if e then applyReg(d, e) end
 			end)
 		end)
 		conns.rem = ingame.DescendantRemoving:Connect(function(d)
@@ -3984,11 +4190,11 @@ do
 			if items[d] then rmItem(d) end
 		end)
 		for _, d in ipairs(ingame:GetDescendants()) do
-			local e = findEntry(d)
-			if e then
-				applyReg(d, e)
-			elseif d:IsA("Tool") and ITEM_MATCH[d.Name] == true then
+			if (d:IsA("Tool") or d:IsA("Model")) and ITEM_MATCH[d.Name] == true then
 				applyItem(d)
+			else
+				local e = findEntry(d)
+				if e then applyReg(d, e) end
 			end
 		end
 	end
@@ -4031,19 +4237,16 @@ do
 			if t then
 				local bp = rec.bp
 				if bp == nil or bp.Parent == nil then
-					bp = tool:FindFirstChild("ItemRoot") or tool:FindFirstChild("Handle") or tool.PrimaryPart
+					bp = baseOf(tool)
 					rec.bp = bp
 				end
 				if bp and bp.Parent then
-					local okP, sp = pcall(cam.WorldToViewportPoint, cam, bp.Position)
+					local dOK = (not myHRP) or ((bp.Position - myHRP.Position).Magnitude <= 300)
 					local show = false
-					if okP and sp then
-						local dOK = true
-						if myHRP then
-							dOK = (bp.Position - myHRP.Position).Magnitude <= 120
-						end
-						show = sp.Z > 0 and dOK
-						if show then
+					if dOK then
+						local okP, sp = pcall(cam.WorldToViewportPoint, cam, bp.Position)
+						if okP and sp and sp.Z > 0 then
+							show = true
 							t.Position = Vector2.new(sp.X, sp.Y)
 						end
 					end
@@ -4107,6 +4310,10 @@ do
 		rescanAll()
 	end
 	function OBJ.shutdown()
+		if supConn then
+			pcall(function() supConn:Disconnect() end)
+			supConn = nil
+		end
 		setTagLoop(false)
 		for inst in pairs(reg) do rmReg(inst) end
 		for tool in pairs(items) do rmItem(tool) end
@@ -4146,25 +4353,32 @@ do
 				if not e.rec.hl then
 					e.rec.hl = applyHL(e.inst, OBJ.colors[e.rec.entry.key])
 				end
+				if OBJ.azureRadius and e.rec.cyl and (e.rec.entry.key == "AzureTrap") then
+					local dynR = e.rec.entry.radius and e.rec.entry.radius(e.inst)
+					if dynR and dynR ~= e.rec.cyl.Radius then
+						pcall(function() e.rec.cyl.Radius = dynR end)
+					end
+				end
 			else
 				if e.rec.hl then pcall(function() e.rec.hl:Destroy() end) e.rec.hl = nil end
 			end
 		end
 		local iList = {}
 		for tool, rec in pairs(items) do
-			if OBJ.master and OBJ.itemsOn then
+			if OBJ.itemsOn then
 				local bp = rec.bp
 				if bp == nil or bp.Parent == nil then
-					bp = tool:FindFirstChild("ItemRoot") or tool:FindFirstChild("Handle") or tool.PrimaryPart
+					bp = baseOf(tool)
 					rec.bp = bp
 				end
 				if bp and bp.Parent then
 					local okD, d = pcall(function() return (bp.Position - myHRP.Position).Magnitude end)
 					if okD and d then
-						if d > 120 then
+						if d > 300 then
 							if rec.hl then pcall(function() rec.hl:Destroy() end) rec.hl = nil end
+							if rec.box then rec.box.Visible = false end
 						else
-							iList[#iList + 1] = { d = d, inst = tool, rec = rec }
+							iList[#iList + 1] = { d = d, inst = tool, rec = rec, bp = bp }
 						end
 					end
 				end
@@ -4173,18 +4387,26 @@ do
 		table.sort(iList, function(a, b) return a.d < b.d end)
 		for i, e in ipairs(iList) do
 			if i <= MAX_ITEM_HL then
-				if not e.rec.hl then
+				if not e.rec.hl or not e.rec.hl.Parent then
 					e.rec.hl = applyHL(e.inst, OBJ.colors.Items)
+				elseif e.rec.hl.Adornee ~= e.bp and e.inst:IsA("Tool") then
+					e.rec.hl.Adornee = e.bp
+				end
+				if e.rec.box then
+					e.rec.box.Adornee = e.bp
+					e.rec.box.Color3 = OBJ.colors.Items
+					e.rec.box.Visible = true
 				end
 			else
 				if e.rec.hl then pcall(function() e.rec.hl:Destroy() end) e.rec.hl = nil end
+				if e.rec.box then e.rec.box.Visible = false end
 			end
 		end
 	end
 
 	local accObj = 0
 	supConn = rs.Heartbeat:Connect(function(dt)
-		if _G.__NERG_KILLED then
+		if _G.__NERG_KILLED or not __PLUS_GEN_ALIVE then
 			supConn:Disconnect()
 			supConn = nil
 			pcall(function() OBJ.shutdown() end)
@@ -4211,9 +4433,10 @@ do
 
 	local function clearAll()
 		for id, part in pairs(markers) do
-			pcall(function() part:Destroy() end)
+			if typeof(part) == "Instance" then pcall(function() part:Destroy() end) end
 			markers[id] = nil
 		end
+		table.clear(births)
 	end
 
 	local function ensureMods()
@@ -4249,27 +4472,32 @@ do
 		local live = m1.Projectiles
 		local liveN = 0
 		for _ in pairs(live) do liveN += 1 end
-				local maxAge = tonumber(P.maxAge) or 0.95
+		local maxAge = tonumber(P.maxAge) or 1.5
 		local nowP = os.clock()
 		for id, part in pairs(markers) do
-			local b = births[id]
-			local age = b and (nowP - b) or 999
-			if live[id] == nil or age >= maxAge then
-				pcall(function() part:Destroy() end)
+			if live[id] == nil then
+				if typeof(part) == "Instance" then pcall(function() part:Destroy() end) end
 				markers[id] = nil
 				births[id] = nil
-			else
-				local ratio = math.clamp(age / maxAge, 0, 1)
-				local fade = ratio * ratio
-				pcall(function()
-					part.Color = P.color
-					part.Transparency = 0.5 + (0.5 * fade)
-					local ad = part:FindFirstChildOfClass("BoxHandleAdornment")
-					if ad then
-						ad.Color3 = P.color
-						ad.Transparency = 0.4 + (0.6 * fade)
-					end
-				end)
+			elseif part ~= false then
+				local b = births[id]
+				local age = b and (nowP - b) or 999
+				if age >= maxAge then
+					if typeof(part) == "Instance" then pcall(function() part:Destroy() end) end
+					markers[id] = false
+				else
+					local ratio = math.clamp(age / maxAge, 0, 1)
+					local fade = ratio * ratio
+					pcall(function()
+						part.Color = P.color
+						part.Transparency = 0.5 + (0.5 * fade)
+						local ad = part:FindFirstChildOfClass("BoxHandleAdornment")
+						if ad then
+							ad.Color3 = P.color
+							ad.Transparency = 0.4 + (0.6 * fade)
+						end
+					end)
+				end
 			end
 		end
 		for id, p in pairs(live) do
@@ -4277,7 +4505,7 @@ do
 				local land = nil
 				pcall(function() land = landingOf(p) end)
 				if land then
-										local pos = p.InitialCFrame.Position
+					local pos = p.InitialCFrame.Position
 					local thick = 0.8
 					pcall(function()
 						local m = p.Model
@@ -4317,7 +4545,7 @@ do
 					markers[id] = part
 					births[id] = os.clock()
 				end
-			elseif markers[id] ~= nil then
+			elseif typeof(markers[id]) == "Instance" then
 				pcall(function() markers[id].Color = P.color end)
 			end
 		end
@@ -4981,7 +5209,7 @@ do
 			newFolder()
 			acc = SCAN
 			hbConn = rs.Heartbeat:Connect(function(dt)
-				if _G.__NERG_KILLED then
+				if _G.__NERG_KILLED or not __PLUS_GEN_ALIVE then
 					pcall(function() W.shutdown() end)
 					return
 				end
@@ -5101,7 +5329,7 @@ end
 	end
 	task.spawn(function()
 		while true do
-			if _G.__NERG_KILLED then break end
+			if _G.__NERG_KILLED or not __PLUS_GEN_ALIVE then break end
 			task.wait(0.25)
 			pcall(function()
 				pcall(reconcileTeam, "Killers", tbl.KillerEsp == true, tbl.EspKillerColor)
@@ -5899,7 +6127,9 @@ a724AimConn = runService.RenderStepped:Connect(function()
 end)
 
 localPlayer.CharacterAdded:Connect(function(character11)
+  if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED then return end
   task.delay(0.5, function()
+    if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED then return end
     f18()
     f4(character11)
     f33(character11)
@@ -6263,10 +6493,16 @@ do
     end,
   })
 
-  -- boot purge: don rac cua lan chay truoc
+  -- boot purge: don rac cua lan chay truoc (thu hẹp phạm vi quét nhân vật, xóa bỏ 30.000 objects)
   pcall(function()
-    for _, d in ipairs(workspace:GetDescendants()) do
-      if d:IsA("Part") and d.Name == "NergAbsRing" then d:Destroy() end
+    local pf = workspaceService:FindFirstChild("Players")
+    local rootsToScan = { pf, localPlayer and localPlayer.Character }
+    for _, root in ipairs(rootsToScan) do
+      if root then
+        for _, d in ipairs(root:GetDescendants()) do
+          if d:IsA("Part") and d.Name == "NergAbsRing" then d:Destroy() end
+        end
+      end
     end
     local pg0 = localPlayer:FindFirstChild("PlayerGui")
     if pg0 then
@@ -6727,41 +6963,702 @@ do
   if autoDodge.on then task.defer(autoDodgeStart) end
 end
 
+-- [A751] Noli Suite (Event-Driven Direct Config Control A/B/C · On-Demand Wall-Safe Aimbot · Anti-Crash · 30Hz Auto Detonate Nova)
+do
+  local pathfindingService = game:GetService("PathfindingService")
+  local MODE_PRESETS = {
+    ["A. Weak"]   = { turn = 3.5,  mult = 6.6,  dur = 5.0,  aimStrength = 0.42, cframeLerp = 0.22 },
+    ["B. Medium"] = { turn = 7.5,  mult = 9.5,  dur = 10.0, aimStrength = 0.75, cframeLerp = 0.45 },
+    ["C. Strong"] = { turn = 16.0, mult = 16.0, dur = 10.0, aimStrength = 1.00, cframeLerp = 0.78 },
+  }
+
+  local noli = {
+    rushCtrl = v2.get("a751NoliRushCtrl", false) and true or false,
+    ctrlMode = tostring(v2.get("a751NoliCtrlMode", "B. Medium")),
+    rushAim = v2.get("a751NoliRushAim", false) and true or false,
+    dashSpeed = math.clamp(tonumber(v2.get("a751NoliDashSpd", 60)) or 60, 45, 110),
+    antiCrash = v2.get("a751NoliAntiCrash", false) and true or false,
+    autoNova = v2.get("a751NoliAutoNova", false) and true or false,
+    novaRadius = math.clamp(tonumber(v2.get("a751NoliNovaRad", 12)) or 12, 6, 24),
+    aimBound = false,
+    savedAutoRotate = nil,
+    curDir = nil,
+    waypoints = {},
+    wpIdx = 1,
+    lastPathTargetPos = nil,
+    lastPathAt = 0,
+    pathBusy = false,
+    actorsMod = nil,
+    savedConfigs = setmetatable({}, { __mode = "k" }),
+    charConns = {},
+    charAddedConn = nil,
+    netMod = nil,
+    origFireServerConn = nil,
+    hookedNet = false,
+    novaConn = nil,
+    novaAcc = 0,
+    projMod = nil,
+    detonatedIds = {},
+    lastNovaFireAt = 0,
+  }
+  if not MODE_PRESETS[noli.ctrlMode] then noli.ctrlMode = "B. Medium" end
+
+  local losRayParams = RaycastParams.new()
+  losRayParams.FilterType = Enum.RaycastFilterType.Exclude
+  losRayParams.IgnoreWater = true
+  losRayParams.RespectCanCollide = true
+
+  -- 1. Direct O(1) Config Patcher (Zero Per-Frame Polling · Preserves 100% Native Cancel & Endlag)
+  local function patchSingleConfig(cfg)
+    if type(cfg) ~= "table" then return end
+    if cfg.VoidRushTurnSpeed == nil and cfg.VoidRushDashSpeed == nil then return end
+    local orig = noli.savedConfigs[cfg]
+    if not orig then
+      orig = {
+        turn = cfg.VoidRushTurnSpeed or 1,
+        mult = cfg.VoidRushInitialTurnMult or 6.6,
+        dur  = cfg.VoidRushInitialTurnDuration or 1.5,
+        spd  = cfg.VoidRushDashSpeed or 60,
+      }
+      noli.savedConfigs[cfg] = orig
+    end
+    if noli.rushCtrl and __PLUS_GEN_ALIVE and not _G.__NERG_KILLED then
+      local preset = MODE_PRESETS[noli.ctrlMode] or MODE_PRESETS["B. Medium"]
+      cfg.VoidRushTurnSpeed = preset.turn
+      cfg.VoidRushInitialTurnMult = preset.mult
+      cfg.VoidRushInitialTurnDuration = preset.dur
+      cfg.VoidRushDashSpeed = noli.dashSpeed
+    else
+      cfg.VoidRushTurnSpeed = orig.turn
+      cfg.VoidRushInitialTurnMult = orig.mult
+      cfg.VoidRushInitialTurnDuration = orig.dur
+      cfg.VoidRushDashSpeed = orig.spd
+    end
+  end
+
+  local function syncNoliConfigs()
+    pcall(function()
+      local assets = replicatedStorage:FindFirstChild("Assets")
+      local killers = assets and assets:FindFirstChild("Killers")
+      local noliFolder = killers and killers:FindFirstChild("Noli")
+      local baseCfgMod = noliFolder and noliFolder:FindFirstChild("Config")
+      if baseCfgMod and baseCfgMod:IsA("ModuleScript") then
+        local ok, baseCfg = pcall(require, baseCfgMod)
+        if ok and type(baseCfg) == "table" then patchSingleConfig(baseCfg) end
+      end
+
+      if not noli.actorsMod then
+        local okA, aMod = pcall(function()
+          return require(replicatedStorage.Modules.Gameplay.Actors)
+        end)
+        if okA and type(aMod) == "table" then noli.actorsMod = aMod end
+      end
+      local curActors = noli.actorsMod and noli.actorsMod.CurrentActors
+      if type(curActors) == "table" then
+        local myActor = curActors[localPlayer]
+        if type(myActor) == "table" and type(myActor.Config) == "table" then
+          patchSingleConfig(myActor.Config)
+        end
+        for _, act in pairs(curActors) do
+          if type(act) == "table" and (act.Player == localPlayer or act.Rig == localPlayer.Character) and type(act.Config) == "table" then
+            patchSingleConfig(act.Config)
+          end
+        end
+      end
+
+      if not noli.rushCtrl then
+        for cfg in pairs(noli.savedConfigs) do
+          patchSingleConfig(cfg)
+        end
+      end
+
+      -- If currently mid-dash when slider is dragged, update active SpeedMultiplier once
+      local ch = localPlayer.Character
+      if ch and (ch.Name == "Noli" or ch:GetAttribute("CharacterName") == "Noli") then
+        local sm = ch:FindFirstChild("SpeedMultipliers")
+        local dashMult = sm and sm:FindFirstChild("VoidRushDash")
+        if dashMult and dashMult:IsA("NumberValue") then
+          local targetSpd = noli.rushCtrl and noli.dashSpeed or 60
+          dashMult.Value = targetSpd / 8
+        end
+      end
+    end)
+  end
+
+  local function resetPathState()
+    noli.waypoints = {}
+    noli.wpIdx = 1
+    noli.lastPathTargetPos = nil
+    noli.lastPathAt = 0
+  end
+
+  local function unbindAimStep()
+    if noli.aimBound then
+      noli.aimBound = false
+      pcall(function() runService:UnbindFromRenderStep("NergNoliRushAim") end)
+    end
+    if noli.savedAutoRotate ~= nil then
+      pcall(function()
+        local ch = localPlayer.Character
+        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+        if hum then hum.AutoRotate = noli.savedAutoRotate end
+      end)
+      noli.savedAutoRotate = nil
+    end
+    noli.curDir = nil
+    resetPathState()
+  end
+
+  local function hasLineOfSight(fromPos, myChar, targetChar, toPos)
+    local filter = { myChar }
+    if targetChar then filter[#filter + 1] = targetChar end
+    if workspaceService.CurrentCamera then filter[#filter + 1] = workspaceService.CurrentCamera end
+    losRayParams.FilterDescendantsInstances = filter
+    local origin = fromPos + Vector3.new(0, 1.5, 0)
+    local delta = toPos - origin
+    if delta.Magnitude < 0.5 then return true end
+    local hit = workspaceService:Raycast(origin, delta, losRayParams)
+    if not hit or not hit.Instance then return true end
+    if hit.Instance.CanCollide == false or hit.Instance.Transparency >= 0.85 then return true end
+    return false
+  end
+
+  local function findNearestSurvivor(myPos)
+    local pf = workspaceService:FindFirstChild("Players")
+    local sf = pf and pf:FindFirstChild("Survivors")
+    if not sf then return nil, nil end
+    local bestChar, bestHrp, bestD = nil, nil, math.huge
+    for _, ch in ipairs(sf:GetChildren()) do
+      if ch:IsA("Model") and ch ~= localPlayer.Character and not ch:GetAttribute("Undetectable") then
+        local hrp = ch:FindFirstChild("HumanoidRootPart")
+        local hum = ch:FindFirstChildOfClass("Humanoid")
+        if hrp and hum and hum.Health > 0 then
+          local d = (hrp.Position - myPos).Magnitude
+          if d < bestD then
+            bestD = d
+            bestChar = ch
+            bestHrp = hrp
+          end
+        end
+      end
+    end
+    return bestChar, bestHrp
+  end
+
+  local function computePathThrottled(fromPos, toPos)
+    if noli.pathBusy then return end
+    local now = os.clock()
+    local movedFar = (not noli.lastPathTargetPos)
+      or (Vector2.new(toPos.X - noli.lastPathTargetPos.X, toPos.Z - noli.lastPathTargetPos.Z).Magnitude > 7)
+    if not movedFar and (now - noli.lastPathAt) < 0.35 then return end
+    noli.pathBusy = true
+    task.spawn(function()
+      local ok = pcall(function()
+        local path = pathfindingService:CreatePath({
+          AgentRadius = 2.2,
+          AgentHeight = 5,
+          AgentCanJump = false,
+          WaypointSpacing = 3,
+        })
+        path:ComputeAsync(fromPos, toPos)
+        if path.Status == Enum.PathStatus.Success then
+          local wps = path:GetWaypoints()
+          if #wps > 0 then
+            local startIdx = 1
+            for i = 1, #wps do
+              local wp = wps[i].Position
+              if Vector2.new(wp.X - fromPos.X, wp.Z - fromPos.Z).Magnitude > 3.5 then
+                startIdx = i
+                break
+              end
+            end
+            noli.waypoints = wps
+            noli.wpIdx = math.min(startIdx, #wps)
+            noli.lastPathTargetPos = wps[#wps].Position
+          else
+            resetPathState()
+          end
+        else
+          resetPathState()
+        end
+      end)
+      if not ok then resetPathState() end
+      noli.lastPathAt = os.clock()
+      noli.pathBusy = false
+    end)
+  end
+
+  local function flatUnit(fromPos, toPos)
+    local v = Vector3.new(toPos.X - fromPos.X, 0, toPos.Z - fromPos.Z)
+    if v.Magnitude < 0.25 then return nil end
+    return v.Unit
+  end
+
+  local function computeHybridSteer(myHrp, myChar, targetChar, targetHrp, allowLead)
+    local myPos = myHrp.Position
+    local tPos = targetHrp.Position
+    if allowLead then
+      local vel = targetHrp.AssemblyLinearVelocity
+      local flatV = Vector3.new(vel.X, 0, vel.Z)
+      if flatV.Magnitude > 1.5 and flatV.Magnitude < 90 then
+        local leadT = math.clamp((tPos - myPos).Magnitude / 65, 0.02, 0.22)
+        tPos = tPos + flatV * leadT
+      end
+    end
+
+    if hasLineOfSight(myPos, myChar, targetChar, tPos + Vector3.new(0, 1.5, 0)) then
+      resetPathState()
+      return flatUnit(myPos, tPos)
+    end
+
+    computePathThrottled(myPos, targetHrp.Position)
+    local wps = noli.waypoints
+    if not wps or #wps == 0 then
+      return flatUnit(myPos, tPos)
+    end
+
+    while noli.wpIdx < #wps do
+      local wp = wps[noli.wpIdx].Position
+      if Vector2.new(wp.X - myPos.X, wp.Z - myPos.Z).Magnitude < 4.2 then
+        noli.wpIdx += 1
+      else
+        break
+      end
+    end
+
+    local chosenPos = wps[noli.wpIdx] and wps[noli.wpIdx].Position or tPos
+    local accDist = 0
+    local prevPos = myPos
+    for i = noli.wpIdx, #wps do
+      local wpPos = wps[i].Position
+      local seg = Vector2.new(wpPos.X - prevPos.X, wpPos.Z - prevPos.Z).Magnitude
+      accDist += seg
+      prevPos = wpPos
+      if accDist <= 9.5 and hasLineOfSight(myPos, myChar, targetChar, wpPos + Vector3.new(0, 1.5, 0)) then
+        chosenPos = wpPos
+      else
+        break
+      end
+    end
+
+    return flatUnit(myPos, chosenPos) or flatUnit(myPos, tPos)
+  end
+
+  local function turnRateClamp(curDir, targetDir, dt, strength)
+    if not targetDir then return curDir end
+    local tx, tz = targetDir.X, targetDir.Z
+    local tMag = math.sqrt(tx * tx + tz * tz)
+    if tMag < 0.001 then return curDir end
+    tx, tz = tx / tMag, tz / tMag
+    if not curDir or curDir.Magnitude < 0.001 then
+      return Vector3.new(tx, 0, tz)
+    end
+    local cx, cz = curDir.X, curDir.Z
+    local cMag = math.sqrt(cx * cx + cz * cz)
+    if cMag < 0.001 then
+      return Vector3.new(tx, 0, tz)
+    end
+    cx, cz = cx / cMag, cz / cMag
+    local dot = math.clamp(cx * tx + cz * tz, -1, 1)
+    local angle = math.acos(dot)
+    local maxArc = math.min((strength or 0.75) * 9.0 * math.max(dt or 0.016, 0.004), 0.52)
+    local maxTurn = 2 * math.asin(math.clamp(maxArc * 0.5, 0, 1))
+    if angle <= maxTurn then
+      return Vector3.new(tx, 0, tz)
+    end
+    local sign = (cz * tx - cx * tz < -1e-5) and -1 or 1
+    local stepAng = maxTurn * sign
+    local cs, sn = math.cos(stepAng), math.sin(stepAng)
+    return Vector3.new(cx * cs + cz * sn, 0, -cx * sn + cz * cs)
+  end
+
+  -- 2. On-Demand Aimbot RenderStep (Runs ONLY during the 3.5s Dash at Character.Value + 25 = 325)
+  local function noliAimStep(dt)
+    if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED or not noli.rushAim then
+      unbindAimStep()
+      return
+    end
+    local ch = localPlayer.Character
+    if not (ch and ch.Parent and (ch.Name == "Noli" or ch:GetAttribute("CharacterName") == "Noli")) then
+      unbindAimStep()
+      return
+    end
+    local rushState = ch:GetAttribute("VoidRushState")
+    local sm = ch:FindFirstChild("SpeedMultipliers")
+    local dashMult = sm and sm:FindFirstChild("VoidRushDash")
+    -- Dual check: immediately unbinds the moment VoidRushState leaves "Dashing" or VoidRushDash is removed
+    if rushState ~= "Dashing" or not dashMult then
+      unbindAimStep()
+      return
+    end
+
+    local myHrp = ch:FindFirstChild("HumanoidRootPart")
+    local hum = ch:FindFirstChildOfClass("Humanoid")
+    if not (myHrp and hum and hum.Health > 0) then
+      unbindAimStep()
+      return
+    end
+
+    local tChar, tHrp = findNearestSurvivor(myHrp.Position)
+    if not (tChar and tHrp) then return end
+
+    local preset = MODE_PRESETS[noli.ctrlMode] or MODE_PRESETS["B. Medium"]
+    local desiredDir = computeHybridSteer(myHrp, ch, tChar, tHrp, noli.ctrlMode ~= "A. Weak")
+    if not desiredDir then return end
+
+    local cur = noli.curDir
+    if not cur then
+      local lv = myHrp.CFrame.LookVector
+      cur = Vector3.new(lv.X, 0, lv.Z).Magnitude > 0.01 and Vector3.new(lv.X, 0, lv.Z).Unit or desiredDir
+    end
+
+    local steerDir = turnRateClamp(cur, desiredDir, dt, preset.aimStrength)
+    noli.curDir = steerDir
+
+    if noli.savedAutoRotate == nil then
+      noli.savedAutoRotate = hum.AutoRotate
+    end
+    hum.AutoRotate = false
+    myHrp.CFrame = myHrp.CFrame:Lerp(CFrame.lookAt(myHrp.Position, myHrp.Position + steerDir), preset.cframeLerp)
+    hum:Move(steerDir)
+  end
+
+  local function bindAimStepIfDashing()
+    local ch = localPlayer.Character
+    if not (ch and ch.Parent and (ch.Name == "Noli" or ch:GetAttribute("CharacterName") == "Noli")) then
+      unbindAimStep()
+      return
+    end
+    if noli.rushCtrl then syncNoliConfigs() end
+    if noli.rushAim and ch:GetAttribute("VoidRushState") == "Dashing" then
+      if not noli.aimBound then
+        noli.aimBound = true
+        local myHrp = ch:FindFirstChild("HumanoidRootPart")
+        if myHrp then
+          local lv0 = myHrp.CFrame.LookVector
+          noli.curDir = Vector3.new(lv0.X, 0, lv0.Z).Magnitude > 0.01 and Vector3.new(lv0.X, 0, lv0.Z).Unit or Vector3.new(0, 0, -1)
+        end
+        pcall(function()
+          runService:UnbindFromRenderStep("NergNoliRushAim")
+          runService:BindToRenderStep("NergNoliRushAim", Enum.RenderPriority.Character.Value + 25, noliAimStep)
+        end)
+      end
+    else
+      unbindAimStep()
+    end
+  end
+
+  local function clearCharConns()
+    for i = #noli.charConns, 1, -1 do
+      local c = noli.charConns[i]
+      noli.charConns[i] = nil
+      pcall(function() c:Disconnect() end)
+    end
+  end
+
+  local function hookNoliCharacter(ch)
+    clearCharConns()
+    unbindAimStep()
+    if not ch then return end
+    task.defer(function()
+      if not (ch and ch.Parent and __PLUS_GEN_ALIVE and not _G.__NERG_KILLED) then return end
+      if noli.rushCtrl then syncNoliConfigs() end
+      noli.charConns[#noli.charConns + 1] = ch:GetAttributeChangedSignal("VoidRushState"):Connect(function()
+        local st = ch:GetAttribute("VoidRushState")
+        if st == "Charging" or st == "Dashing" then
+          if noli.rushCtrl then syncNoliConfigs() end
+        end
+        if st == "Dashing" and noli.rushAim then
+          bindAimStepIfDashing()
+        elseif st ~= "Dashing" then
+          unbindAimStep()
+        end
+      end)
+      bindAimStepIfDashing()
+    end)
+  end
+
+  if localPlayer.Character then hookNoliCharacter(localPlayer.Character) end
+  noli.charAddedConn = localPlayer.CharacterAdded:Connect(function(ch)
+    if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED then return end
+    task.delay(0.6, function() hookNoliCharacter(ch) end)
+  end)
+
+  local function setAntiCrash(v)
+    noli.antiCrash = v and true or false
+    v2.set("a751NoliAntiCrash", noli.antiCrash)
+    if noli.antiCrash then
+      if not noli.hookedNet then
+        pcall(function()
+          local net = noli.netMod or require(replicatedStorage.Modules.Network.Network)
+          if type(net) == "table" and type(net.FireServerConnection) == "function" then
+            noli.netMod = net
+            noli.origFireServerConn = net.FireServerConnection
+            net.FireServerConnection = function(selfArg, eventName, kind, ...)
+              if noli.antiCrash and __PLUS_GEN_ALIVE and not _G.__NERG_KILLED then
+                if eventName == (localPlayer.Name .. "VoidRushCollision") and kind == "REMOTE_EVENT" then
+                  return nil
+                end
+              end
+              return noli.origFireServerConn(selfArg, eventName, kind, ...)
+            end
+            noli.hookedNet = true
+          end
+        end)
+      end
+    else
+      if noli.hookedNet and noli.netMod and noli.origFireServerConn then
+        pcall(function()
+          noli.netMod.FireServerConnection = noli.origFireServerConn
+        end)
+        noli.hookedNet = false
+      end
+    end
+  end
+
+  local function setAutoNova(v)
+    noli.autoNova = v and true or false
+    v2.set("a751NoliAutoNova", noli.autoNova)
+    if noli.novaConn then
+      pcall(function() noli.novaConn:Disconnect() end)
+      noli.novaConn = nil
+    end
+    table.clear(noli.detonatedIds)
+    if not noli.autoNova then return end
+
+    pcall(function()
+      if not noli.projMod then
+        noli.projMod = require(replicatedStorage.Systems.Player.Game.ProjectileReplication)
+      end
+    end)
+
+    noli.novaAcc = 0
+    noli.novaConn = runService.Heartbeat:Connect(function(dt)
+      if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED or not noli.autoNova then
+        if noli.novaConn then noli.novaConn:Disconnect() noli.novaConn = nil end
+        return
+      end
+      noli.novaAcc += (dt or 0.016)
+      if noli.novaAcc < 0.033 then return end
+      noli.novaAcc = 0
+
+      local live = noli.projMod and noli.projMod.Projectiles
+      if type(live) ~= "table" or next(live) == nil then return end
+
+      local ch = localPlayer.Character
+      if not (ch and ch.Parent and (ch.Name == "Noli" or ch:GetAttribute("CharacterName") == "Noli")) then return end
+      local now = os.clock()
+      if now - noli.lastNovaFireAt < 0.45 then return end
+
+      local pf = workspaceService:FindFirstChild("Players")
+      local sf = pf and pf:FindFirstChild("Survivors")
+      if not sf then return end
+
+      for id, p in pairs(live) do
+        if not noli.detonatedIds[id] and type(p) == "table" then
+          local mdl = p.Model
+          local isNova = false
+          local pPos = nil
+          if typeof(mdl) == "Instance" and mdl.Parent then
+            if mdl.Name == "Voidstar" or mdl.Name:find("Voidstar") or mdl.Name:find("Nova") then
+              isNova = true
+              local okP, posVal = pcall(function()
+                return mdl:IsA("BasePart") and mdl.Position or mdl:GetPivot().Position
+              end)
+              if okP then pPos = posVal end
+            end
+          end
+          if isNova and pPos then
+            for _, surv in ipairs(sf:GetChildren()) do
+              if surv:IsA("Model") and not surv:GetAttribute("Undetectable") then
+                local sHrp = surv:FindFirstChild("HumanoidRootPart")
+                local sHum = surv:FindFirstChildOfClass("Humanoid")
+                if sHrp and sHum and sHum.Health > 0 then
+                  if (sHrp.Position - pPos).Magnitude <= noli.novaRadius then
+                    noli.detonatedIds[id] = now
+                    noli.lastNovaFireAt = now
+                    if remoteEvent then
+                      remoteEvent:FireServer("UseActorAbility", { [1] = buffer.fromstring("\3\4\0\0\0Nova") })
+                    end
+                    return
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+
+      for id, t0 in pairs(noli.detonatedIds) do
+        if live[id] == nil or (now - t0) > 10 then
+          noli.detonatedIds[id] = nil
+        end
+      end
+    end)
+  end
+
+  local function stopNoliSuite()
+    noli.rushCtrl = false
+    noli.rushAim = false
+    syncNoliConfigs()
+    unbindAimStep()
+    clearCharConns()
+    if noli.charAddedConn then pcall(function() noli.charAddedConn:Disconnect() end) noli.charAddedConn = nil end
+    setAntiCrash(false)
+    setAutoNova(false)
+  end
+
+  rawset(_G, "NERG_NOLI", {
+    setRushCtrl = function(v)
+      noli.rushCtrl = v and true or false
+      v2.set("a751NoliRushCtrl", noli.rushCtrl)
+      syncNoliConfigs()
+    end,
+    setCtrlMode = function(m)
+      if MODE_PRESETS[tostring(m)] then
+        noli.ctrlMode = tostring(m)
+        v2.set("a751NoliCtrlMode", noli.ctrlMode)
+        if noli.rushCtrl then syncNoliConfigs() end
+      end
+    end,
+    setRushAim = function(v)
+      noli.rushAim = v and true or false
+      v2.set("a751NoliRushAim", noli.rushAim)
+      bindAimStepIfDashing()
+    end,
+    setDashSpeed = function(n)
+      noli.dashSpeed = math.clamp(tonumber(n) or 60, 45, 110)
+      v2.set("a751NoliDashSpd", noli.dashSpeed)
+      if noli.rushCtrl then syncNoliConfigs() end
+    end,
+    setAntiCrash = setAntiCrash,
+    setAutoNova = setAutoNova,
+    setNovaRadius = function(n)
+      noli.novaRadius = math.clamp(tonumber(n) or 12, 6, 24)
+      v2.set("a751NoliNovaRad", noli.novaRadius)
+    end,
+    get = function(k) return noli[k] end,
+    stop = stopNoliSuite,
+  })
+
+  local noliSec = killerTab:Section({ Title = "Noli (Void Rush & Nova)", Opened = true })
+  CFG_UI["NoliRushCtrl"] = noliSec:Toggle({
+    Title = "Void Rush Control",
+    Type = "Checkbox",
+    Value = noli.rushCtrl,
+    Callback = function(v)
+      if uiBoot then return end
+      pcall(function() _G.NERG_NOLI.setRushCtrl(v) end)
+    end,
+  })
+  CFG_UI["NoliCtrlMode"] = noliSec:Dropdown({
+    Title = "Void Rush Control Strength",
+    Values = { "A. Weak", "B. Medium", "C. Strong" },
+    Value = noli.ctrlMode,
+    Callback = function(v)
+      if uiBoot then return end
+      pcall(function() _G.NERG_NOLI.setCtrlMode(v) end)
+    end,
+  })
+  CFG_UI["NoliRushAim"] = noliSec:Toggle({
+    Title = "Void Rush Aimbot (Wall-Safe Pathfind)",
+    Type = "Checkbox",
+    Value = noli.rushAim,
+    Callback = function(v)
+      if uiBoot then return end
+      pcall(function() _G.NERG_NOLI.setRushAim(v) end)
+    end,
+  })
+  CFG_UI["NoliDashSpd"] = noliSec:Slider({
+    Title = "Void Rush Speed",
+    Step = 2,
+    Value = { Min = 45, Max = 110, Default = noli.dashSpeed },
+    Callback = function(n)
+      if uiBoot then return end
+      pcall(function() _G.NERG_NOLI.setDashSpeed(n) end)
+    end,
+  })
+  CFG_UI["NoliAntiCrash"] = noliSec:Toggle({
+    Title = "Void Rush Anti-Crash (Wall Bypass)",
+    Type = "Checkbox",
+    Value = noli.antiCrash,
+    Callback = function(v)
+      if uiBoot then return end
+      pcall(function() _G.NERG_NOLI.setAntiCrash(v) end)
+    end,
+  })
+  CFG_UI["NoliAutoNova"] = noliSec:Toggle({
+    Title = "Auto Detonate Nova",
+    Type = "Checkbox",
+    Value = noli.autoNova,
+    Callback = function(v)
+      if uiBoot then return end
+      pcall(function() _G.NERG_NOLI.setAutoNova(v) end)
+    end,
+  })
+  CFG_UI["NoliNovaRad"] = noliSec:Slider({
+    Title = "Nova Detonate Radius (studs)",
+    Step = 1,
+    Value = { Min = 6, Max = 24, Default = noli.novaRadius },
+    Callback = function(n)
+      if uiBoot then return end
+      pcall(function() _G.NERG_NOLI.setNovaRadius(n) end)
+    end,
+  })
+
+  if noli.rushCtrl then task.defer(syncNoliConfigs) end
+  if noli.rushAim then task.defer(bindAimStepIfDashing) end
+  if noli.antiCrash then task.defer(setAntiCrash, true) end
+  if noli.autoNova then task.defer(setAutoNova, true) end
+end
+
 local SPlayer = v1PRBLOCKWindow:Section({ Title = "Player", Opened = true })
 local visualTab = SPlayer:Tab({ Title = "Visual", Icon = "eye" })
 local staminaTab = SPlayer:Tab({ Title = "Stamina", Icon = "zap" })
 local genAutoTab = SPlayer:Tab({ Title = "Auto Gen", Icon = "cpu" })
 local camTab = SPlayer:Tab({ Title = "Camera", Icon = "camera" })
-local camCore = { fov = 70, zoom = 12, keep = false, on = false, bound = false, prevFov = nil }
-pcall(function()
+do
+local camCore = { fov = 70, origFov = 70, zoom = 12, keep = false, on = false, bound = false }
+local function readDefaultFov()
   local pd = localPlayer:FindFirstChild("PlayerData")
-  local fv = pd and pd:FindFirstChild("FieldOfView", true)
-  local cam = workspace.CurrentCamera
-  if fv and fv:IsA("NumberValue") then
-    camCore.fov = math.floor(fv.Value)
-  elseif cam then
-    camCore.fov = math.floor(cam.FieldOfView)
+  local st = pd and pd:FindFirstChild("Settings")
+  local gm = st and st:FindFirstChild("Game")
+  local fv = (gm and gm:FindFirstChild("FieldOfView")) or (pd and pd:FindFirstChild("FieldOfView", true))
+  if fv and (fv:IsA("NumberValue") or fv:IsA("IntValue")) then
+    return math.clamp(math.floor(fv.Value), 60, 120)
   end
-  camCore.fov = math.clamp(camCore.fov, 60, 120)
+  local cam = workspaceService.CurrentCamera
+  if cam then
+    return math.clamp(math.floor(cam.FieldOfView), 60, 120)
+  end
+  return 70
+end
+pcall(function()
+  local defFov = readDefaultFov()
+  camCore.fov = defFov
+  camCore.origFov = defFov
   camCore.zoom = game:GetService("StarterPlayer").CameraMaxZoomDistance
 end)
 local function camPushFov()
-  if localPlayer:GetAttribute("FOVMultipliersDisabled") then return end
-  local c0 = workspace.CurrentCamera
-  if c0 and c0.FieldOfView ~= camCore.fov then c0.FieldOfView = camCore.fov end
+  local c0 = workspaceService.CurrentCamera
+  if c0 and c0.FieldOfView ~= camCore.fov then
+    c0.FieldOfView = camCore.fov
+  end
 end
-function camCore.set(v)
+local function setCustomFov(v)
   local want = v and true or false
-  local cam = workspace.CurrentCamera
+  local cam = workspaceService.CurrentCamera
   if want then
-    if not cam then return end
-    if not camCore.on then camCore.prevFov = cam.FieldOfView end
+    if not camCore.on then
+      camCore.origFov = readDefaultFov()
+    end
     camCore.on = true
     if not camCore.bound then
       camCore.bound = true
       pcall(function()
         runService:BindToRenderStep("NergCamFov", Enum.RenderPriority.Camera.Value + 1, function()
-          if camCore.on then camPushFov() end
+          if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED or not camCore.on then return end
+          camPushFov()
         end)
       end)
     end
@@ -6772,13 +7669,13 @@ function camCore.set(v)
       camCore.bound = false
       pcall(function() runService:UnbindFromRenderStep("NergCamFov") end)
     end
-    if camCore.prevFov then
-      local f0 = camCore.prevFov
-      camCore.prevFov = nil
-      if cam and not localPlayer:GetAttribute("FOVMultipliersDisabled") then pcall(function() cam.FieldOfView = f0 end) end
+    local restoreFov = readDefaultFov() or camCore.origFov or 70
+    if cam then
+      pcall(function() cam.FieldOfView = restoreFov end)
     end
   end
 end
+camCore.set = setCustomFov
 rawset(_G, "__NERG_CAM_RELEASE", function()
   pcall(function() camCore.set(false) end)
   pcall(function() camCore.keep = false end)
@@ -6817,6 +7714,7 @@ do
       pcall(function() localPlayer.CameraMaxZoomDistance = camCore.zoom end)
     end
   end)
+end
 end
 
 SCombat = v1PRBLOCKWindow:Section({ Title = "Combat", Opened = true })
@@ -6973,23 +7871,13 @@ function stamCore.viewStart()
 				sLoss, sGain = 9.5, 21
 			end
 			if root then
-				local moving = root.Velocity.Magnitude > 0.4
+				local linVel = root.AssemblyLinearVelocity
+				local flatVelMag = Vector3.new(linVel.X, 0, linVel.Z).Magnitude
+				local hum = ch:FindFirstChildOfClass("Humanoid")
+				local moveDirMag = hum and hum.MoveDirection.Magnitude or 0
+				local moving = flatVelMag > 0.5 or moveDirMag > 0.1
 				local sprinting = mod.IsSprinting == true
-				local canSprint = true
-				if ch.Parent and ch.Parent.Name == "Killers" then
-					canSprint = false
-					local pos = root.Position
-					for _, pl in ipairs(players:GetPlayers()) do
-						if pl ~= localPlayer and pl.Character and pl.Character.Parent and pl.Character.Parent.Name == "Survivors" then
-							local r2 = pl.Character:FindFirstChild("HumanoidRootPart")
-							if r2 and (r2.Position - pos).Magnitude <= 100 then
-								canSprint = true
-								break
-							end
-						end
-					end
-				end
-				local isSpr = sprinting and moving and canSprint
+				local isSpr = sprinting and moving
 				if isSpr then
 					sv.tur = math.clamp((sv.tur or 0) + dt * 0.05, 0.2, 3)
 					sv.v = math.clamp(sv.v - sLoss * dt, 0, m)
@@ -7236,12 +8124,12 @@ do
 		if not autoBlock then
 			default = false
 			v2.set("guestShowVisionRange", false)
-			if f18 then pcall(f18) end
+			if setVisLoop then setVisLoop(false) elseif f18 then pcall(f18) end
 		else
 			local shouldCone = (not a742pHitboxMode)
 			default = shouldCone
 			v2.set("guestShowVisionRange", shouldCone)
-			if not shouldCone and f18 then pcall(f18) end
+			if setVisLoop then setVisLoop(shouldCone) elseif not shouldCone and f18 then pcall(f18) end
 		end
 		pcall(function()
 			local tg = CFG_UI["AutoBlock"]
@@ -7469,6 +8357,338 @@ pcall(function()
   end)
 end)
 
+pcall(function()
+  local lighting = game:GetService("Lighting")
+  local hudState = { on = false, gui = nil, bar = nil, lbl = nil, hbConn = nil, dragConns = {}, accTime = 0, frames = 0, pos = nil }
+
+  local function clearHudConns()
+    if hudState.hbConn then pcall(function() hudState.hbConn:Disconnect() end) hudState.hbConn = nil end
+    for i = #hudState.dragConns, 1, -1 do
+      local c = hudState.dragConns[i]
+      hudState.dragConns[i] = nil
+      pcall(function() c:Disconnect() end)
+    end
+  end
+
+  local function setupStatusHud(v)
+    hudState.on = v and true or false
+    clearHudConns()
+    if not hudState.on then
+      if hudState.gui then pcall(function() hudState.gui:Destroy() end) hudState.gui = nil hudState.bar = nil hudState.lbl = nil end
+      return
+    end
+    if not (hudState.gui and hudState.gui.Parent) then
+      local g = Instance.new("ScreenGui")
+      g.Name = "NergStatusHUD"
+      g.ResetOnSpawn = false
+      g.IgnoreGuiInset = true
+      g.DisplayOrder = 550
+      g.Parent = (gethui and gethui()) or game:GetService("CoreGui")
+
+      local bar = Instance.new("Frame")
+      bar.Name = "Bar"
+      bar.Size = UDim2.fromOffset(130, 26)
+      bar.Position = hudState.pos or UDim2.new(0.5, -65, 0, 12)
+      bar.BackgroundColor3 = Color3.fromHex("#080C14")
+      bar.BackgroundTransparency = 0.35
+      bar.BorderSizePixel = 0
+      bar.Active = true
+      bar.Parent = g
+
+      local cor = Instance.new("UICorner")
+      cor.CornerRadius = UDim.new(0, 6)
+      cor.Parent = bar
+
+      local str = Instance.new("UIStroke")
+      str.Color = Color3.fromRGB(125, 211, 252)
+      str.Thickness = 1.2
+      str.Transparency = 0.25
+      str.Parent = bar
+
+      local lbl = Instance.new("TextLabel")
+      lbl.Name = "StatusText"
+      lbl.Size = UDim2.fromScale(1, 1)
+      lbl.BackgroundTransparency = 1
+      lbl.Font = Enum.Font.GothamBold
+      lbl.TextSize = 12
+      lbl.TextColor3 = Color3.fromHex("#EAF6FF")
+      lbl.Text = "FPS: -- | -- ms"
+      lbl.Parent = bar
+
+      hudState.gui, hudState.bar, hudState.lbl = g, bar, lbl
+    end
+
+    local bar = hudState.bar
+    local dragging, dragStart, startPos = false, nil, nil
+    hudState.dragConns[#hudState.dragConns + 1] = bar.InputBegan:Connect(function(inp)
+      if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = inp.Position
+        startPos = bar.Position
+        local endConn
+        endConn = inp.Changed:Connect(function()
+          if inp.UserInputState == Enum.UserInputState.End then
+            endConn:Disconnect()
+            dragging = false
+            hudState.pos = bar.Position
+          end
+        end)
+      end
+    end)
+    hudState.dragConns[#hudState.dragConns + 1] = userInputService.InputChanged:Connect(function(inp)
+      if dragging and dragStart and startPos and (inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch) then
+        local cam = workspaceService.CurrentCamera
+        local vp = cam and cam.ViewportSize or Vector2.new(1920, 1080)
+        local d = inp.Position - dragStart
+        local nx = math.clamp(startPos.X.Scale * vp.X + startPos.X.Offset + d.X, 4, math.max(4, vp.X - 134))
+        local ny = math.clamp(startPos.Y.Scale * vp.Y + startPos.Y.Offset + d.Y, 4, math.max(4, vp.Y - 30))
+        bar.Position = UDim2.fromOffset(nx, ny)
+      end
+    end)
+
+    hudState.accTime, hudState.frames = 0.5, 0
+    hudState.hbConn = runService.Heartbeat:Connect(function(dt)
+      if _G.__NERG_KILLED or not __PLUS_GEN_ALIVE or not hudState.on then
+        setupStatusHud(false)
+        return
+      end
+      hudState.frames += 1
+      hudState.accTime += (dt or 0.016)
+      if hudState.accTime < 0.5 then return end
+      local fps = math.clamp(math.floor((hudState.frames / math.max(0.05, hudState.accTime)) + 0.5), 1, 999)
+      hudState.frames, hudState.accTime = 0, 0
+      local ping = 0
+      local okP, pVal = pcall(function() return localPlayer:GetNetworkPing() * 1000 end)
+      if okP and type(pVal) == "number" and pVal > 0 then
+        ping = math.floor(pVal + 0.5)
+      else
+        pcall(function()
+          local net = statsService:FindFirstChild("Network")
+          local ssi = net and net:FindFirstChild("ServerStatsItem")
+          local dp = ssi and ssi:FindFirstChild("Data Ping")
+          if dp then ping = math.floor(dp:GetValue() + 0.5) end
+        end)
+      end
+      if hudState.lbl then
+        hudState.lbl.Text = string.format("FPS: %d | %d ms", fps, ping)
+      end
+    end)
+  end
+
+  rawset(_G, "NERG_HUD", {
+    set = setupStatusHud,
+    shutdown = function() setupStatusHud(false) end
+  })
+
+  local fbState = { on = false, saved = nil, fxSaved = setmetatable({}, { __mode = "k" }), lightConn = nil, descConn = nil, lock = false }
+  local ltState = { on = false, parts = setmetatable({}, { __mode = "k" }), decals = setmetatable({}, { __mode = "k" }), fx = setmetatable({}, { __mode = "k" }), addConn = nil }
+
+  local function applyFxFullbright(inst)
+    if not inst then return end
+    if inst:IsA("Atmosphere") then
+      if not fbState.fxSaved[inst] then
+        fbState.fxSaved[inst] = { d = inst.Density, h = inst.Haze, g = inst.Glare }
+      end
+      pcall(function()
+        inst.Density = 0
+        inst.Haze = 0
+        inst.Glare = 0
+      end)
+    elseif inst:IsA("BlurEffect") or inst:IsA("DepthOfFieldEffect") then
+      if not fbState.fxSaved[inst] then
+        fbState.fxSaved[inst] = { e = inst.Enabled }
+      end
+      pcall(function() inst.Enabled = false end)
+    end
+  end
+
+  local function pushFullbright()
+    if fbState.lock or not fbState.on then return end
+    fbState.lock = true
+    pcall(function()
+      lighting.Ambient = Color3.fromRGB(178, 178, 178)
+      lighting.OutdoorAmbient = Color3.fromRGB(128, 128, 128)
+      lighting.Brightness = 2
+      lighting.FogStart = 100000
+      lighting.FogEnd = 100000
+      lighting.GlobalShadows = false
+      for _, ch in ipairs(lighting:GetChildren()) do
+        applyFxFullbright(ch)
+      end
+    end)
+    fbState.lock = false
+  end
+
+  local function setFullbright(v)
+    local want = v and true or false
+    if want then
+      if not fbState.saved then
+        fbState.saved = {
+          Ambient = lighting.Ambient,
+          OutdoorAmbient = lighting.OutdoorAmbient,
+          Brightness = lighting.Brightness,
+          FogStart = lighting.FogStart,
+          FogEnd = lighting.FogEnd,
+          GlobalShadows = lighting.GlobalShadows
+        }
+      end
+      fbState.on = true
+      pushFullbright()
+      if not fbState.lightConn then
+        fbState.lightConn = lighting.Changed:Connect(function()
+          if fbState.on and not fbState.lock then
+            pushFullbright()
+          end
+        end)
+      end
+      if not fbState.descConn then
+        fbState.descConn = lighting.ChildAdded:Connect(function(ch)
+          if fbState.on then task.defer(applyFxFullbright, ch) end
+        end)
+      end
+    else
+      fbState.on = false
+      if fbState.lightConn then pcall(function() fbState.lightConn:Disconnect() end) fbState.lightConn = nil end
+      if fbState.descConn then pcall(function() fbState.descConn:Disconnect() end) fbState.descConn = nil end
+      if fbState.saved then
+        local s = fbState.saved
+        fbState.saved = nil
+        fbState.lock = true
+        pcall(function()
+          lighting.Ambient = s.Ambient
+          lighting.OutdoorAmbient = s.OutdoorAmbient
+          lighting.Brightness = s.Brightness
+          lighting.FogStart = s.FogStart
+          lighting.FogEnd = s.FogEnd
+          lighting.GlobalShadows = s.GlobalShadows
+        end)
+        fbState.lock = false
+      end
+      for inst, sv in pairs(fbState.fxSaved) do
+        if inst and inst.Parent then
+          pcall(function()
+            if inst:IsA("Atmosphere") then
+              inst.Density = sv.d
+              inst.Haze = sv.h
+              inst.Glare = sv.g
+            elseif sv.e ~= nil then
+              inst.Enabled = sv.e
+            end
+          end)
+        end
+        fbState.fxSaved[inst] = nil
+      end
+    end
+  end
+
+  local function isIgnoredRoot(inst)
+    local pf = workspaceService:FindFirstChild("Players")
+    if pf and inst:IsDescendantOf(pf) then return true end
+    if visFolder and inst:IsDescendantOf(visFolder) then return true end
+    if a742pFolder and inst:IsDescendantOf(a742pFolder) then return true end
+    return false
+  end
+
+  local function applyLowTexInst(d)
+    if not d or not d.Parent or isIgnoredRoot(d) then return end
+    if d:IsA("BasePart") then
+      if not ltState.parts[d] then
+        ltState.parts[d] = { m = d.Material, v = d.MaterialVariant, c = d.CastShadow }
+      end
+      pcall(function()
+        d.Material = Enum.Material.SmoothPlastic
+        d.MaterialVariant = ""
+        d.CastShadow = false
+      end)
+    elseif d:IsA("Decal") or d:IsA("Texture") then
+      if ltState.decals[d] == nil then
+        ltState.decals[d] = d.Transparency
+      end
+      pcall(function() d.Transparency = 1 end)
+    elseif d:IsA("ParticleEmitter") or d:IsA("Trail") then
+      if ltState.fx[d] == nil then
+        ltState.fx[d] = d.Enabled
+      end
+      pcall(function() d.Enabled = false end)
+    end
+  end
+
+  local function setLowTexture(v)
+    local want = v and true or false
+    if want then
+      ltState.on = true
+      local roots = { workspaceService:FindFirstChild("Map"), workspaceService:FindFirstChild("Lobby") }
+      if not roots[1] and not roots[2] then roots = { workspaceService } end
+      for _, r in ipairs(roots) do
+        if r then
+          for _, d in ipairs(r:GetDescendants()) do
+            applyLowTexInst(d)
+          end
+        end
+      end
+      if not ltState.addConn then
+        ltState.addConn = workspaceService.DescendantAdded:Connect(function(d)
+          if ltState.on then task.defer(applyLowTexInst, d) end
+        end)
+      end
+    else
+      ltState.on = false
+      if ltState.addConn then pcall(function() ltState.addConn:Disconnect() end) ltState.addConn = nil end
+      for d, sv in pairs(ltState.parts) do
+        if d and d.Parent then
+          pcall(function()
+            d.Material = sv.m
+            d.MaterialVariant = sv.v
+            d.CastShadow = sv.c
+          end)
+        end
+        ltState.parts[d] = nil
+      end
+      for d, tr in pairs(ltState.decals) do
+        if d and d.Parent then
+          pcall(function() d.Transparency = tr end)
+        end
+        ltState.decals[d] = nil
+      end
+      for d, en in pairs(ltState.fx) do
+        if d and d.Parent then
+          pcall(function() d.Enabled = en end)
+        end
+        ltState.fx[d] = nil
+      end
+    end
+  end
+
+  rawset(_G, "NERG_GFX", {
+    setFullbright = setFullbright,
+    setLowTexture = setLowTexture,
+    shutdown = function()
+      setFullbright(false)
+      setLowTexture(false)
+    end
+  })
+
+  local gfxSec = visualTab:Section({ Title = "Graphics Optimizer", Icon = "sparkles" })
+  CFG_UI["StatusHud"] = gfxSec:Toggle({
+    Title = "Status HUD (FPS/Ping)",
+    Type = "Checkbox",
+    Value = false,
+    Callback = function(v) if uiBoot then return end pcall(setupStatusHud, v) end
+  })
+  CFG_UI["Fullbright"] = gfxSec:Toggle({
+    Title = "Fullbright & No Fog",
+    Type = "Checkbox",
+    Value = false,
+    Callback = function(v) if uiBoot then return end pcall(setFullbright, v) end
+  })
+  CFG_UI["LowTex"] = gfxSec:Toggle({
+    Title = "Low Texture Mode (FPS Booster)",
+    Type = "Checkbox",
+    Value = false,
+    Callback = function(v) if uiBoot then return end pcall(setLowTexture, v) end
+  })
+end)
+
 
 pcall(function()
 	infoTab:Paragraph({
@@ -7484,7 +8704,7 @@ pcall(function()
 				Title = "Copy Discord",
 				Icon = "link",
 				Callback = function()
-					if setclipboard then pcall(setclipboard, "https://discord.gg/frM8Zcq3kE") end
+					if setclipboard then pcall(setclipboard, "https://discord.gg/hYysBDc2z6") end
 					pcall(function()
 						windUI:Notify({ Title = "NergPlus", Content = "Discord link copied to clipboard!", Duration = 4, Icon = "paw-print" })
 					end)
@@ -8065,11 +9285,21 @@ do
             end
           end
           if success then return end
+          local rz, cz = rc(z2)
           local onp = { [a2] = true }
           local cells = { a2 }
+          local function cmpNbr(p, q)
+            local rp, cp = rc(p)
+            local rq, cq = rc(q)
+            return (math.abs(rp - rz) + math.abs(cp - cz)) < (math.abs(rq - rz) + math.abs(cq - cz))
+          end
           local function dfs(c)
             nodes += 1
-            if nodes > 500000 or success then return end
+            if nodes > 15000 or success or inp.Ended or not mod.flow.on then return end
+            if nodes % 350 == 0 then
+              task.wait()
+              if inp.Ended or not mod.flow.on then return end
+            end
             if c == z2 then
               local snap = {}
               for j, vv in ipairs(cells) do snap[j] = vv end
@@ -8089,14 +9319,16 @@ do
               end
               return
             end
-            for _, nx in ipairs(neighbors(c)) do
+            local nbrs = neighbors(c)
+            table.sort(nbrs, cmpNbr)
+            for _, nx in ipairs(nbrs) do
               if not onp[nx] and not used[nx] and (nx == z2 or not endpointBlocked(nx, i2)) then
                 onp[nx] = true
                 cells[#cells + 1] = nx
                 dfs(nx)
                 cells[#cells] = nil
                 onp[nx] = nil
-                if nodes > 500000 or success then return end
+                if nodes > 15000 or success or inp.Ended or not mod.flow.on then return end
               end
             end
           end
@@ -8262,20 +9494,34 @@ do
         end
       end) end
     end
-    local espFolder, espConn, hlPool, bbPool, tracked = nil, nil, {}, {}, {}
+    local espFolder, espConn, hlPool, bbPool, boxPool, slotUsed, tracked = nil, nil, {}, {}, {}, {}, {}
+    local gearPool, gearIng, gearAddConn, gearRemConn = {}, nil, nil, nil
     local MAXD, CAP = 200, 8
-      local accA743 = 0
-      local idleG = 0
+    local accA743 = 0
+    local idleG = 0
     local function espClean()
       for _, e in pairs(tracked) do
-        if e.hl then e.hl.Enabled = false end
-        if e.bb then e.bb.Enabled = false end
-        e.hl, e.bb = nil, nil
+        if e.hl then e.hl.Enabled = false e.hl.Adornee = nil end
+        if e.bb then e.bb.Enabled = false e.bb.Adornee = nil end
+        if e.box then e.box.Visible = false e.box.Adornee = nil end
+        if e.slot then slotUsed[e.slot] = nil end
+        if e.ghl and e.ghl.Parent then pcall(function() e.ghl.Enabled = true end) end
+        e.hl, e.bb, e.box, e.slot, e.ghl = nil, nil, nil, nil, nil
       end
       table.clear(tracked)
+      table.clear(slotUsed)
+    end
+    local function allocSlot()
+      for s = 1, CAP do
+        if not slotUsed[s] then
+          slotUsed[s] = true
+          return s
+        end
+      end
+      return nil
     end
     local function espBuild()
-      if espFolder then return end
+      if espFolder and espFolder.Parent then return end
       espFolder = Instance.new("Folder")
       espFolder.Name = "NergPlus_A743_GearESP"
       espFolder.Parent = workspace
@@ -8283,13 +9529,23 @@ do
         local hl = Instance.new("Highlight")
         hl.Name = "NergPlus_A743_GearHL"
         hl.FillColor = Color3.fromRGB(255, 200, 0)
-        hl.OutlineColor = Color3.fromRGB(180, 130, 0)
-        hl.FillTransparency = 0.65
+        hl.OutlineColor = Color3.fromRGB(255, 235, 80)
+        hl.FillTransparency = 0.55
         hl.OutlineTransparency = 0
         hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
         hl.Enabled = false
         hl.Parent = espFolder
         hlPool[i] = hl
+        local box = Instance.new("BoxHandleAdornment")
+        box.Name = "NergPlus_A743_GearBox"
+        box.Color3 = Color3.fromRGB(255, 205, 0)
+        box.Transparency = 0.35
+        box.AlwaysOnTop = true
+        box.ZIndex = 8
+        box.Size = Vector3.new(2.2, 2.2, 2.2)
+        box.Visible = false
+        box.Parent = espFolder
+        boxPool[i] = box
         local bb = Instance.new("BillboardGui")
         bb.Name = "NergPlus_A743_GearTag"
         bb.Size = UDim2.fromOffset(140, 22)
@@ -8297,13 +9553,14 @@ do
         bb.AlwaysOnTop = true
         bb.Enabled = false
         local tl = Instance.new("TextLabel")
+        tl.Name = "TextLabel"
         tl.Size = UDim2.fromScale(1, 1)
         tl.BackgroundTransparency = 1
         tl.Font = Enum.Font.GothamBold
         tl.TextScaled = true
         tl.TextColor3 = Color3.fromRGB(255, 220, 80)
-        tl.TextStrokeTransparency = 0.4
-        tl.Text = ""
+        tl.TextStrokeTransparency = 0.2
+        tl.Text = "Gear"
         tl.Parent = bb
         bb.Parent = espFolder
         bbPool[i] = bb
@@ -8330,6 +9587,7 @@ do
         return
       end
       idleG = 0
+      espBuild()
       local chr = LPA.Character
       local hrp = chr and chr:FindFirstChild("HumanoidRootPart")
       if not hrp then
@@ -8337,45 +9595,88 @@ do
         return
       end
       local seen = {}
-      local n = 0
       local ing = workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Ingame")
-      local scanRoot = ing or workspace
-      for _, d in ipairs(scanRoot:GetDescendants()) do
-        if n >= CAP then break end
-        if d:IsA("Model") and d.Name == "Gear" then
-          local realG = false
-          if d:FindFirstChild("GearHighlight") then
+      if not ing then
+        if gearIng then
+          gearIng = nil
+          table.clear(gearPool)
+          if gearAddConn then pcall(function() gearAddConn:Disconnect() end) gearAddConn = nil end
+          if gearRemConn then pcall(function() gearRemConn:Disconnect() end) gearRemConn = nil end
+        end
+        espClean()
+        return
+      end
+      if ing ~= gearIng then
+        gearIng = ing
+        table.clear(gearPool)
+        if gearAddConn then pcall(function() gearAddConn:Disconnect() end) gearAddConn = nil end
+        if gearRemConn then pcall(function() gearRemConn:Disconnect() end) gearRemConn = nil end
+        for _, d0 in ipairs(ing:GetDescendants()) do
+          if d0:IsA("Model") and d0.Name == "Gear" then gearPool[d0] = true end
+        end
+        gearAddConn = ing.DescendantAdded:Connect(function(d0)
+          if d0:IsA("Model") and d0.Name == "Gear" then gearPool[d0] = true end
+        end)
+        gearRemConn = ing.DescendantRemoving:Connect(function(d0)
+          gearPool[d0] = nil
+        end)
+      end
+      for d in pairs(gearPool) do
+        if not d.Parent then
+          gearPool[d] = nil
+        elseif d:IsA("Model") and d.Name == "Gear" then
+          local realG = (d:GetAttribute("__NP_REAL_GEAR") == true)
+          local ghl = d:FindFirstChild("GearHighlight")
+          if ghl then
             realG = true
-          else
+          elseif not realG then
             local prompt = d:FindFirstChildWhichIsA("ProximityPrompt", true)
-            if prompt and prompt.Enabled then
+            if prompt then
               local act = tostring(prompt.ActionText):lower()
               local obj = tostring(prompt.ObjectText):lower()
               if act:find("pick") or act:find("take") or act:find("grab") or act:find("collect")
-                 or obj:find("gear") or act == "" then
+                 or act:find("gear") or obj:find("gear") then
                 realG = true
               end
             end
           end
           if realG then
-            local ok, pv = pcall(function() return d:GetPivot().Position end)
-            if ok and pv then
-              local kc = (hrp.Position - pv).Magnitude
-              if kc <= (tracked[d] and MAXD or 185) then
-                seen[d] = true
-                local entry = tracked[d]
-                if not entry then
-                  n += 1
-                  entry = { hl = hlPool[n], bb = bbPool[n], dist = kc }
-                  tracked[d] = entry
-                  entry.hl.Adornee = d
-                  entry.hl.Enabled = true
-                  entry.bb.Adornee = d
-                  entry.bb.Enabled = true
-                else
-                  entry.dist = kc
+            if d:GetAttribute("__NP_REAL_GEAR") ~= true then
+              pcall(function() d:SetAttribute("__NP_REAL_GEAR", true) end)
+            end
+            local bp = (ghl and ghl.Parent and ghl.Parent:IsA("BasePart") and ghl.Parent)
+              or d.PrimaryPart
+              or d:FindFirstChildWhichIsA("BasePart", true)
+            if bp and bp.Size.Magnitude <= 25 then
+              local ok, pv = pcall(function() return bp.Position end)
+              if ok and pv then
+                local kc = (hrp.Position - pv).Magnitude
+                if kc <= (tracked[d] and MAXD or 185) then
+                  local entry = tracked[d]
+                  if not entry then
+                    local s = allocSlot()
+                    if s then
+                      entry = { slot = s, hl = hlPool[s], bb = bbPool[s], box = boxPool[s], dist = kc, ghl = ghl }
+                      tracked[d] = entry
+                    end
+                  else
+                    entry.dist = kc
+                    entry.ghl = ghl or entry.ghl
+                  end
+                  if entry then
+                    seen[d] = true
+                    if entry.hl then
+                      entry.hl.Enabled = false
+                      entry.hl.Adornee = nil
+                    end
+                    entry.box.Adornee = bp
+                    entry.box.Size = bp.Size + Vector3.new(0.3, 0.3, 0.3)
+                    entry.box.Visible = true
+                    entry.bb.Adornee = bp
+                    entry.bb.Enabled = true
+                    entry.bb.TextLabel.Text = string.format("Gear [%dm]", math.floor(kc + 0.5))
+                  end
                 end
-                entry.bb.TextLabel.Text = "Gear"
               end
             end
           end
@@ -8386,9 +9687,11 @@ do
           entry.miss = 0
         else
           entry.miss = (entry.miss or 0) + 1
-          if entry.miss >= 3 then
-            if entry.hl then entry.hl.Enabled = false end
-            if entry.bb then entry.bb.Enabled = false end
+          if not d.Parent or entry.miss >= 2 then
+            if entry.hl then entry.hl.Enabled = false entry.hl.Adornee = nil end
+            if entry.bb then entry.bb.Enabled = false entry.bb.Adornee = nil end
+            if entry.box then entry.box.Visible = false entry.box.Adornee = nil end
+            if entry.slot then slotUsed[entry.slot] = nil end
             tracked[d] = nil
           end
         end
@@ -8404,7 +9707,13 @@ do
     end
     function mod.gearStop()
       mod.gear.on = false
+      if espConn then pcall(function() espConn:Disconnect() end) espConn = nil end
+      if gearAddConn then pcall(function() gearAddConn:Disconnect() end) gearAddConn = nil end
+      if gearRemConn then pcall(function() gearRemConn:Disconnect() end) gearRemConn = nil end
+      gearIng = nil
+      table.clear(gearPool)
       espClean()
+      if espFolder then pcall(function() espFolder:Destroy() end) espFolder = nil table.clear(hlPool) table.clear(bbPool) table.clear(boxPool) end
     end
     return mod
   end)
@@ -8484,12 +9793,12 @@ CFG_UI["AutoBlock"] = coreBlockSection:Toggle({
     if not autoBlock then
       default = false
       v2.set("guestShowVisionRange", false)
-      if f18 then pcall(f18) end
+      if setVisLoop then setVisLoop(false) elseif f18 then pcall(f18) end
     else
       local shouldCone = (not a742pHitboxMode)
       default = shouldCone
       v2.set("guestShowVisionRange", shouldCone)
-      if not shouldCone and f18 then pcall(f18) end
+      if setVisLoop then setVisLoop(shouldCone) elseif not shouldCone and f18 then pcall(f18) end
     end
   end,
 })
@@ -8505,12 +9814,12 @@ CFG_UI["ABKey"] = coreBlockSection:Keybind({
     if not autoBlock then
       default = false
       v2.set("guestShowVisionRange", false)
-      if f18 then pcall(f18) end
+      if setVisLoop then setVisLoop(false) elseif f18 then pcall(f18) end
     else
       local shouldCone = (not a742pHitboxMode)
       default = shouldCone
       v2.set("guestShowVisionRange", shouldCone)
-      if not shouldCone and f18 then pcall(f18) end
+      if setVisLoop then setVisLoop(shouldCone) elseif not shouldCone and f18 then pcall(f18) end
     end
     pcall(function()
       local tg = CFG_UI["AutoBlock"]
@@ -8544,11 +9853,11 @@ CFG_UI["ABBlockMode"] = coreBlockSection:Dropdown({
     if autoBlock then
       default = not isHitbox
       v2.set("guestShowVisionRange", not isHitbox)
-      if isHitbox and f18 then pcall(f18) end
+      if setVisLoop then setVisLoop(not isHitbox) elseif isHitbox and f18 then pcall(f18) end
     else
       default = false
       v2.set("guestShowVisionRange", false)
-      if f18 then pcall(f18) end
+      if setVisLoop then setVisLoop(false) elseif f18 then pcall(f18) end
     end
   end,
 })
@@ -8780,7 +10089,7 @@ do
 end
 
 cfgTab = SSystem:Tab({ Title = "Config", Icon = "settings" })
-do
+pcall(function()
   local HttpService = game:GetService("HttpService")
   local function cfgNotify(msg)
     pcall(function()
@@ -8790,13 +10099,13 @@ do
   local CFG_REG = {
     { "Auto Block", "guestAutoBlockAudioOn", function() return autoBlock end, function(v) autoBlock = v if a742jPaint then pcall(a742jPaint) end end, true, "AutoBlock" },
     { "M1 Detection", "blockM1Detect", function() return a742oAnimM1 and "Animation" or "Sound" end, function(v) a742oAnimM1 = (v == "Animation") end, "Sound", "ABM1Detect" },
-    { "Block Detection", "blockDetectMode", function() return a742pHitboxMode and "Hitbox" or "Cone" end, function(v) local isHb = (v == "Hitbox") a742pHitboxMode = isHb default = not isHb if not isHb and a742pClearBoxes then pcall(a742pClearBoxes) end end, "Cone", "ABBlockMode" },
+    { "Block Detection", "blockDetectMode", function() return a742pHitboxMode and "Hitbox" or "Cone" end, function(v) local isHb = (v == "Hitbox") a742pHitboxMode = isHb default = autoBlock and (not isHb) or false if setVisLoop then setVisLoop(default) end if not isHb and a742pClearBoxes then pcall(a742pClearBoxes) end end, "Cone", "ABBlockMode" },
     { "Hitbox Length Scale", "a742pLenScale", function() return a742pLenScale end, function(v) a742pLenScale = v end, 1, "ABHbLen" },
     { "Hitbox Width Scale", "a742pWidScale", function() return a742pWidScale end, function(v) a742pWidScale = v end, 1, "ABHbWid" },
     { "Auto Punch", "guestAutoPunchOn", function() return autoPunch end, function(v) autoPunch = v end, true, "AutoPunch" },
     { "Auto Punch Delay (s)", "guestAutoPunchDelay", function() return v12 end, function(v) v12 = v end, 0.3, "AutoDelay" },
     { "Verify Facing", "guestVerifyFacingCheckOn", function() return v8 end, function(v) v8 = v end, true, "Facing" },
-    { "Vision Cone", "guestShowVisionRange", function() return default end, function(v) default = v end, false, "VisionCone" },
+    { "Vision Cone", "guestShowVisionRange", function() return default end, function(v) default = v; if setVisLoop then setVisLoop(v) end end, false, "VisionCone" },
     { "Vision Range", "guestVisionRange", function() return visionRange end, function(v) visionRange = v end, 13.5, "VisRange" },
     { "Vision Angle", "guestVisionAngle", function() return visionAngle end, function(v) visionAngle = v end, 85, "VisAngle" },
     { "Block Delay", "guestBlockDelay", function() return blockDelay end, function(v) blockDelay = v end, 0, "BlockDelay" },
@@ -8882,6 +10191,13 @@ do
     { "Anti Backstab", "a747ABOn", function() return _G.NERG_ABS and _G.NERG_ABS.on() or false end, function(v) pcall(function() _G.NERG_ABS.set(v) end) end, false, "AbsOn" },
     { "Anti Backstab Range", "a747ABRange", function() return _G.NERG_ABS and _G.NERG_ABS.range() or 27 end, function(v) pcall(function() _G.NERG_ABS.setRange(v) end) end, 27, "AbsRange" },
     { "Anti Backstab Duration", "a747ABDur", function() return _G.NERG_ABS and _G.NERG_ABS.duration() or 0.8 end, function(v) pcall(function() _G.NERG_ABS.setDuration(v) end) end, 0.8, "AbsDur" },
+    { "Noli Void Rush Control", "a751NoliRushCtrl", function() return _G.NERG_NOLI and _G.NERG_NOLI.get("rushCtrl") or false end, function(v) pcall(function() _G.NERG_NOLI.setRushCtrl(v) end) end, false, "NoliRushCtrl" },
+    { "Noli Control Mode", "a751NoliCtrlMode", function() return _G.NERG_NOLI and _G.NERG_NOLI.get("ctrlMode") or "B. Medium" end, function(v) pcall(function() _G.NERG_NOLI.setCtrlMode(v) end) end, "B. Medium", "NoliCtrlMode" },
+    { "Noli Void Rush Aimbot", "a751NoliRushAim", function() return _G.NERG_NOLI and _G.NERG_NOLI.get("rushAim") or false end, function(v) pcall(function() _G.NERG_NOLI.setRushAim(v) end) end, false, "NoliRushAim" },
+    { "Noli Dash Speed", "a751NoliDashSpd", function() return _G.NERG_NOLI and _G.NERG_NOLI.get("dashSpeed") or 60 end, function(v) pcall(function() _G.NERG_NOLI.setDashSpeed(v) end) end, 60, "NoliDashSpd" },
+    { "Noli Anti-Crash", "a751NoliAntiCrash", function() return _G.NERG_NOLI and _G.NERG_NOLI.get("antiCrash") or false end, function(v) pcall(function() _G.NERG_NOLI.setAntiCrash(v) end) end, false, "NoliAntiCrash" },
+    { "Noli Auto Nova", "a751NoliAutoNova", function() return _G.NERG_NOLI and _G.NERG_NOLI.get("autoNova") or false end, function(v) pcall(function() _G.NERG_NOLI.setAutoNova(v) end) end, false, "NoliAutoNova" },
+    { "Noli Nova Radius", "a751NoliNovaRad", function() return _G.NERG_NOLI and _G.NERG_NOLI.get("novaRadius") or 12 end, function(v) pcall(function() _G.NERG_NOLI.setNovaRadius(v) end) end, 12, "NoliNovaRad" },
   }
   local function uiRepaint()
     for _, e in ipairs(CFG_REG) do
@@ -9061,7 +10377,7 @@ do
       uiRepaint()
       cfgNotify("loaded " .. nn .. " keys — live & cooking")
     end })
-  end)end
+  end)end)
 
 a665UiKey = userInputService.InputBegan:Connect(function(input, gp)
   if gp then return end
@@ -9082,10 +10398,13 @@ function nergUnloadAll(lydo)
   pcall(function() if _G.NERG_ESP_SHUTDOWN then _G.NERG_ESP_SHUTDOWN() n += 1 end end)
   pcall(function() if _G.NERG_ABS then _G.NERG_ABS.stop() n += 1 end end)
   pcall(function() if _G.NERG_DODGE then _G.NERG_DODGE.stop() n += 1 end end)
+  pcall(function() if _G.NERG_NOLI then _G.NERG_NOLI.stop() n += 1 end end)
   pcall(function() if _G.__NERG_CAM_RELEASE then _G.__NERG_CAM_RELEASE() n += 1 end end)
   pcall(function() if _G.NERG_OBJ and _G.NERG_OBJ.shutdown then _G.NERG_OBJ.shutdown() n += 1 end end)
   pcall(function() if _G.NERG_PROJ and _G.NERG_PROJ.shutdown then _G.NERG_PROJ.shutdown() n += 1 end end)
   pcall(function() if _G.NERG_WINDUP and _G.NERG_WINDUP.shutdown then _G.NERG_WINDUP.shutdown() n += 1 end end)
+  pcall(function() if _G.NERG_HUD and _G.NERG_HUD.shutdown then _G.NERG_HUD.shutdown() n += 1 end end)
+  pcall(function() if _G.NERG_GFX and _G.NERG_GFX.shutdown then _G.NERG_GFX.shutdown() n += 1 end end)
   pcall(function() if type(StopESPSystem) == "function" then StopESPSystem() n += 1 end end)
   pcall(function()
     if stamCore then
@@ -9121,6 +10440,11 @@ function nergUnloadAll(lydo)
   pcall(function() if a742wHeart then a742wHeart:Disconnect() a742wHeart = nil n += 1 end end)
   pcall(function() if a655EarConn then a655EarConn:Disconnect() a655EarConn = nil n += 1 end end)
   pcall(function() if a665UiKey then a665UiKey:Disconnect() a665UiKey = nil end end)
+  pcall(function() if connect then connect:Disconnect() connect = nil end end)
+  pcall(function() if connect12 then connect12:Disconnect() connect12 = nil end end)
+  pcall(f31)
+  pcall(f15)
+  pcall(f23)
   pcall(function() if connect8 then connect8:Disconnect() connect8 = nil end end)
   pcall(function() if clearKillerSoundConns then clearKillerSoundConns() n += 1 end end)
   for k9, c9 in pairs(animEarConns) do pcall(function() c9:Disconnect() end) pcall(function() k9:SetAttribute("__A641_ANIM_EAR", nil) end) end
