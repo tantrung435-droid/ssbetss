@@ -10111,7 +10111,7 @@ end
 
 -- [A752] Combat Extensions: Killer M1 Aimbot & Jane Doe Suite (Instant Crystal, Crystal Aim, Hatchet Aim)
 do
-  local EXPERIMENTAL_ON = { JaneDoe = false }
+  local EXPERIMENTAL_ON = { JaneDoe = true }
   local ext = {
     killerM1Aim = v2.get("killerM1Aim", false) and true or false,
     jdInstantCrystal = EXPERIMENTAL_ON.JaneDoe and (v2.get("jdInstantCrystal", false) and true or false) or false,
@@ -10119,13 +10119,9 @@ do
     jdHatchetAim = EXPERIMENTAL_ON.JaneDoe and (v2.get("jdHatchetAim", false) and true or false) or false,
     m1AimBound = false,
     m1AimUntil = 0,
-    crystalAimBound = false,
     crystalCharging = false,
     crystalChargeStartAt = 0,
     crystalThrowUntil = 0,
-    chargeSession = 0,
-    instantThread = nil,
-    activeChargeTrack = nil,
     hatchetAimBound = false,
     hatchetAimUntil = 0,
     savedCrystalConfigs = setmetatable({}, { __mode = "k" }),
@@ -10137,8 +10133,15 @@ do
     charConns = {},
     uiConns = {},
     mainCharConn = nil,
-    netMod = nil,
     actorsMod = nil,
+    mouseMod = nil,
+    origGetMousePos = nil,
+    origGetCamCF = nil,
+    hookedMouseMod = false,
+    utilMod = nil,
+    origUtilMousePos = nil,
+    origUtilCamCF = nil,
+    hookedUtilMod = false,
   }
 
   local M1_SKILL_BLACKLIST = {
@@ -10227,6 +10230,7 @@ do
         ChannelTime = crystalTbl.ChannelTime ~= nil and crystalTbl.ChannelTime or 0.2,
         MinChargeTime = crystalTbl.MinChargeTime ~= nil and crystalTbl.MinChargeTime or 0.25,
         MaxChargeTime = crystalTbl.MaxChargeTime ~= nil and crystalTbl.MaxChargeTime or 2,
+        MaximumHoldTime = crystalTbl.MaximumHoldTime ~= nil and crystalTbl.MaximumHoldTime or 2,
         ChargeSpeedMult = crystalTbl.ChargeSpeedMult ~= nil and crystalTbl.ChargeSpeedMult or 0.75,
       }
       ext.savedCrystalConfigs[crystalTbl] = orig
@@ -10235,11 +10239,13 @@ do
       crystalTbl.ChannelTime = 0
       crystalTbl.MinChargeTime = 0
       crystalTbl.MaxChargeTime = 0.01
+      crystalTbl.MaximumHoldTime = 999999
       crystalTbl.ChargeSpeedMult = 1
     else
       crystalTbl.ChannelTime = orig.ChannelTime
       crystalTbl.MinChargeTime = orig.MinChargeTime
       crystalTbl.MaxChargeTime = orig.MaxChargeTime
+      crystalTbl.MaximumHoldTime = orig.MaximumHoldTime
       crystalTbl.ChargeSpeedMult = orig.ChargeSpeedMult
     end
   end
@@ -10292,8 +10298,13 @@ do
       local curActors = ext.actorsMod and ext.actorsMod.CurrentActors
       if type(curActors) == "table" then
         for _, act in pairs(curActors) do
-          if type(act) == "table" and (act.Player == localPlayer or act.Rig == localPlayer.Character) and type(act.Config) == "table" and type(act.Config.Crystal) == "table" then
-            patchSingleCrystalTable(act.Config.Crystal, enable)
+          if type(act) == "table" and (act.Player == localPlayer or act.Rig == localPlayer.Character) then
+            if type(act.Config) == "table" and type(act.Config.Crystal) == "table" then
+              patchSingleCrystalTable(act.Config.Crystal, enable)
+            end
+            if enable and type(act.State) == "table" then
+              act.State.CrystalFullChargeTime = nil
+            end
           end
         end
       end
@@ -10411,7 +10422,7 @@ do
     end
   end
 
-  local JD_CRYSTAL_STEP = "NergJDCrystalAim"
+  local PITCH_COMP_ANGLE = -math.atan(1 / 3)
 
   local function getChargeDisplayGui()
     local pg = localPlayer:FindFirstChild("PlayerGui")
@@ -10424,226 +10435,239 @@ do
     return nil
   end
 
-  local function applyCrystalAimFrame(myHrp, hum)
-    local kHrp = findNearestLivingKiller(myHrp.Position, 180)
-    if not kHrp then return false end
-    local aimPoint = kHrp.Position
-    local flat = Vector3.new(aimPoint.X - myHrp.Position.X, 0, aimPoint.Z - myHrp.Position.Z)
-    if flat.Magnitude > 0.05 then
-      a724RotLock(hum, "jd_crystal")
-      pcall(function() myHrp.AssemblyAngularVelocity = Vector3.zero end)
-      myHrp.CFrame = CFrame.lookAt(myHrp.Position, Vector3.new(aimPoint.X, myHrp.Position.Y, aimPoint.Z))
+  local function getMyJaneDoeActor()
+    if not ext.actorsMod then
+      local okA, aMod = pcall(function()
+        return require(replicatedStorage.Modules.Gameplay.Actors)
+      end)
+      if okA and type(aMod) == "table" then ext.actorsMod = aMod end
     end
-    local cam = workspaceService.CurrentCamera
-    if cam then
-      local camPos = cam.CFrame.Position
-      if (aimPoint - camPos).Magnitude > 0.1 then
-        cam.CFrame = CFrame.lookAt(camPos, aimPoint)
+    local curActors = ext.actorsMod and ext.actorsMod.CurrentActors
+    if type(curActors) ~= "table" then return nil end
+    local myAct = curActors[localPlayer]
+    if type(myAct) == "table" then return myAct end
+    for _, act in pairs(curActors) do
+      if type(act) == "table" and (act.Player == localPlayer or act.Rig == localPlayer.Character) then
+        return act
       end
     end
-    return true
+    return nil
   end
 
-  local function stopCrystalAim()
-    local wasBound = ext.crystalAimBound
-    ext.crystalAimBound = false
-    ext.crystalCharging = false
-    ext.crystalThrowUntil = 0
-    pcall(function() runService:UnbindFromRenderStep(JD_CRYSTAL_STEP) end)
-    if wasBound or a724RotLocks["jd_crystal"] then
-      pcall(function()
-        local ch = localPlayer.Character
-        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-        a724RotUnlock(hum, "jd_crystal")
-      end)
+  local function isCrystalAimActiveNow()
+    local now = os.clock()
+    if ext.crystalCharging and (now - ext.crystalChargeStartAt) > 12 then
+      ext.crystalCharging = false
     end
+    if ext.crystalCharging or now <= ext.crystalThrowUntil then
+      return true
+    end
+    if getChargeDisplayGui() ~= nil then
+      if not ext.crystalCharging then
+        ext.crystalCharging = true
+        ext.crystalChargeStartAt = now
+      end
+      return true
+    end
+    local act = getMyJaneDoeActor()
+    local st = act and act.State
+    if type(st) == "table" and st.IsCrystalEquipped == true then
+      return true
+    end
+    return false
   end
 
-  local function stepCrystalAim()
-    if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED or not ext.jdCrystalAim then
-      stopCrystalAim()
-      return
+  local function computeCrystalBallisticAimPos()
+    if not (__PLUS_GEN_ALIVE and not _G.__NERG_KILLED and ext.jdCrystalAim) then
+      return nil, nil, nil
     end
     local ch = localPlayer.Character
     if not isLocalJaneDoe(ch) then
-      stopCrystalAim()
-      return
+      return nil, nil, nil
     end
     local myHrp = ch:FindFirstChild("HumanoidRootPart")
     local hum = ch:FindFirstChildOfClass("Humanoid")
     if not (myHrp and hum and hum.Health > 0) then
-      stopCrystalAim()
+      return nil, nil, nil
+    end
+    if not isCrystalAimActiveNow() then
+      return nil, nil, nil
+    end
+    local kHrp = findNearestLivingKiller(myHrp.Position, 180)
+    if not kHrp then
+      return nil, nil, nil
+    end
+
+    local act = getMyJaneDoeActor()
+    local cCfg = act and type(act.Config) == "table" and act.Config.Crystal
+    local minSpd = (type(cCfg) == "table" and tonumber(cCfg.MinSpeed)) or 35
+    local maxSpd = (type(cCfg) == "table" and tonumber(cCfg.MaxSpeed)) or 250
+    local gravArc = (type(cCfg) == "table" and tonumber(cCfg.ProjectileArc)) or 40
+    local maxChargeT = (type(cCfg) == "table" and tonumber(cCfg.MaxChargeTime)) or 2.0
+    local chanT = (type(cCfg) == "table" and tonumber(cCfg.ChannelTime)) or 0.2
+
+    local chargeRatio = 1.0
+    if not ext.jdInstantCrystal and maxChargeT > 0.05 then
+      local elapsed = math.max(0, os.clock() - (ext.crystalChargeStartAt or os.clock()) - chanT)
+      chargeRatio = math.clamp(elapsed / maxChargeT, 0.125, 1.0)
+    end
+    local projSpd = minSpd + (maxSpd - minSpd) * chargeRatio
+    local liftY = (hum.HipHeight + (myHrp.Size.Y * 0.5)) * 0.5
+    local launchOrigin = myHrp.Position + Vector3.new(0, liftY, 0)
+
+    local kPos = kHrp.Position
+    local kVel = kHrp.AssemblyLinearVelocity
+    local flatVel = Vector3.new(kVel.X, 0, kVel.Z)
+    if flatVel.Magnitude > 85 then
+      flatVel = flatVel.Unit * 85
+    end
+    local dist0 = (kPos - launchOrigin).Magnitude
+    local tFlight = math.clamp(dist0 / math.max(projSpd, 35), 0.02, 2.2)
+    local predPos = kPos + flatVel * tFlight
+    tFlight = math.clamp((predPos - launchOrigin).Magnitude / math.max(projSpd, 35), 0.02, 2.2)
+    predPos = kPos + flatVel * tFlight
+    local gravDrop = 0.5 * gravArc * (tFlight * tFlight)
+    local aimPoint = predPos + Vector3.new(0, gravDrop, 0)
+    return aimPoint, launchOrigin, myHrp
+  end
+
+  local function buildCompensatedCamCF(aimPoint, myHrp, fallbackCF)
+    local cam = workspaceService.CurrentCamera
+    local camPos = (cam and cam.CFrame.Position)
+      or (typeof(fallbackCF) == "CFrame" and fallbackCF.Position)
+      or myHrp.Position
+    local delta = aimPoint - myHrp.Position
+    if delta.Magnitude < 0.05 then
+      return fallbackCF or (cam and cam.CFrame) or myHrp.CFrame
+    end
+    local dirToAim = delta.Unit
+    return CFrame.lookAt(camPos, camPos + dirToAim) * CFrame.Angles(PITCH_COMP_ANGLE, 0, 0)
+  end
+
+  local function restoreCrystalSilentAimHooks()
+    if ext.hookedMouseMod and ext.mouseMod then
+      pcall(function()
+        if ext.origGetMousePos then ext.mouseMod.GetMousePos = ext.origGetMousePos end
+        if ext.origGetCamCF then ext.mouseMod.GetCameraCFrame = ext.origGetCamCF end
+      end)
+      ext.hookedMouseMod = false
+    end
+    if ext.hookedUtilMod and ext.utilMod then
+      pcall(function()
+        if ext.origUtilMousePos then ext.utilMod.GetPlayerMousePosition = ext.origUtilMousePos end
+        if ext.origUtilCamCF then ext.utilMod.GetPlayerCameraCFrame = ext.origUtilCamCF end
+      end)
+      ext.hookedUtilMod = false
+    end
+  end
+
+  local function syncCrystalSilentAimHooks()
+    local want = ext.jdCrystalAim and __PLUS_GEN_ALIVE and not _G.__NERG_KILLED
+    if not want then
+      restoreCrystalSilentAimHooks()
       return
     end
-    local now = os.clock()
-    local cdGui = getChargeDisplayGui()
-    if cdGui then
-      ext.crystalCharging = true
-    elseif ext.crystalCharging and (now - ext.crystalChargeStartAt) > 2.4 then
-      ext.crystalCharging = false
-    end
-    local inThrowWindow = now <= ext.crystalThrowUntil
-    if not (ext.crystalCharging or inThrowWindow) then
-      stopCrystalAim()
-      return
-    end
-    if not applyCrystalAimFrame(myHrp, hum) then
-      if a724RotLocks["jd_crystal"] then
-        a724RotUnlock(hum, "jd_crystal")
+    pcall(function()
+      if not ext.mouseMod then
+        local sys = replicatedStorage:FindFirstChild("Systems")
+        local ply = sys and sys:FindFirstChild("Player")
+        local misc = ply and ply:FindFirstChild("Miscellaneous")
+        local mpMod = misc and misc:FindFirstChild("GetPlayerMousePosition")
+        if mpMod and mpMod:IsA("ModuleScript") then
+          local okM, mTbl = pcall(require, mpMod)
+          if okM and type(mTbl) == "table" then ext.mouseMod = mTbl end
+        end
       end
-    end
+      local mMod = ext.mouseMod
+      if type(mMod) == "table" and not ext.hookedMouseMod then
+        if type(mMod.GetMousePos) == "function" then
+          ext.origGetMousePos = ext.origGetMousePos or mMod.GetMousePos
+          mMod.GetMousePos = function(...)
+            local aimPoint = computeCrystalBallisticAimPos()
+            if aimPoint then
+              return aimPoint
+            end
+            return ext.origGetMousePos(...)
+          end
+        end
+        if type(mMod.GetCameraCFrame) == "function" then
+          ext.origGetCamCF = ext.origGetCamCF or mMod.GetCameraCFrame
+          mMod.GetCameraCFrame = function(...)
+            local origCF = ext.origGetCamCF(...)
+            local aimPoint, _, myHrp = computeCrystalBallisticAimPos()
+            if aimPoint and myHrp then
+              return buildCompensatedCamCF(aimPoint, myHrp, origCF)
+            end
+            return origCF
+          end
+        end
+        ext.hookedMouseMod = true
+      end
+    end)
+
+    pcall(function()
+      if not ext.utilMod then
+        local mods = replicatedStorage:FindFirstChild("Modules")
+        local utils = mods and mods:FindFirstChild("Utilities")
+        local uMod = utils and utils:FindFirstChild("Util")
+        if uMod and uMod:IsA("ModuleScript") then
+          local okU, uTbl = pcall(require, uMod)
+          if okU and type(uTbl) == "table" then ext.utilMod = uTbl end
+        end
+      end
+      local uMod = ext.utilMod
+      if type(uMod) == "table" and not ext.hookedUtilMod then
+        if type(uMod.GetPlayerMousePosition) == "function" then
+          ext.origUtilMousePos = ext.origUtilMousePos or uMod.GetPlayerMousePosition
+          uMod.GetPlayerMousePosition = function(selfArg, plrArg, ...)
+            local targetPlr = (plrArg == nil and typeof(selfArg) == "Instance") and selfArg or plrArg
+            if targetPlr == nil or targetPlr == localPlayer then
+              local aimPoint = computeCrystalBallisticAimPos()
+              if aimPoint then
+                return aimPoint
+              end
+            end
+            return ext.origUtilMousePos(selfArg, plrArg, ...)
+          end
+        end
+        if type(uMod.GetPlayerCameraCFrame) == "function" then
+          ext.origUtilCamCF = ext.origUtilCamCF or uMod.GetPlayerCameraCFrame
+          uMod.GetPlayerCameraCFrame = function(selfArg, plrArg, ...)
+            local origCF = ext.origUtilCamCF(selfArg, plrArg, ...)
+            local targetPlr = (plrArg == nil and typeof(selfArg) == "Instance") and selfArg or plrArg
+            if targetPlr == nil or targetPlr == localPlayer then
+              local aimPoint, _, myHrp = computeCrystalBallisticAimPos()
+              if aimPoint and myHrp then
+                return buildCompensatedCamCF(aimPoint, myHrp, origCF)
+              end
+            end
+            return origCF
+          end
+        end
+        ext.hookedUtilMod = true
+      end
+    end)
+  end
+
+  local function stopCrystalAim()
+    ext.crystalCharging = false
+    ext.crystalThrowUntil = 0
   end
 
   local function startCrystalAimWindow(isThrowPhase)
     if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED or not ext.jdCrystalAim then return end
     local ch = localPlayer.Character
     if not isLocalJaneDoe(ch) then return end
-    local myHrp = ch:FindFirstChild("HumanoidRootPart")
-    local hum = ch:FindFirstChildOfClass("Humanoid")
-    if not (myHrp and hum and hum.Health > 0) then return end
     local now = os.clock()
     if isThrowPhase then
       ext.crystalCharging = false
-      ext.crystalThrowUntil = now + 0.75
+      ext.crystalThrowUntil = now + 0.85
     else
       if not ext.crystalCharging then
         ext.crystalChargeStartAt = now
       end
       ext.crystalCharging = true
-      if ext.jdInstantCrystal then
-        ext.crystalThrowUntil = math.max(ext.crystalThrowUntil, now + 0.75)
-      end
     end
-    applyCrystalAimFrame(myHrp, hum)
-    if not ext.crystalAimBound then
-      ext.crystalAimBound = true
-      pcall(function()
-        runService:UnbindFromRenderStep(JD_CRYSTAL_STEP)
-        runService:BindToRenderStep(JD_CRYSTAL_STEP, Enum.RenderPriority.Camera.Value + 5, stepCrystalAim)
-      end)
-    end
-  end
-
-  local function cancelInstantSession()
-    ext.chargeSession += 1
-    ext.activeChargeTrack = nil
-    if ext.instantThread then
-      local th = ext.instantThread
-      ext.instantThread = nil
-      if coroutine.running() ~= th then
-        pcall(task.cancel, th)
-      end
-    end
-  end
-
-  local function sendCrystalReleasePacket()
-    pcall(function()
-      if not ext.netMod then
-        local okN, nMod = pcall(function()
-          return require(replicatedStorage.Modules.Network.Network)
-        end)
-        if not (okN and type(nMod) == "table") then
-          okN, nMod = pcall(function()
-            return require(replicatedStorage.Modules.Network)
-          end)
-        end
-        if okN and type(nMod) == "table" then
-          ext.netMod = nMod
-        end
-      end
-      local evName = localPlayer.Name .. "CrystalInput"
-      local net = ext.netMod
-      if type(net) == "table" and type(net.FireServerConnection) == "function" then
-        local okColon = pcall(function()
-          net:FireServerConnection(evName, "REMOTE_EVENT", 1)
-        end)
-        if not okColon then
-          pcall(function()
-            net.FireServerConnection(evName, "REMOTE_EVENT", 1)
-          end)
-        end
-      end
-    end)
-  end
-
-  local function isChargeSessionActive(tr)
-    if getChargeDisplayGui() ~= nil then
-      return true
-    end
-    if tr ~= nil then
-      local okP, playing = pcall(function() return tr.IsPlaying end)
-      if okP and playing == true then
-        return true
-      end
-    end
-    return false
-  end
-
-  local function beginInstantSession(tr)
-    if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED or not ext.jdInstantCrystal then return end
-    local ch = localPlayer.Character
-    if not isLocalJaneDoe(ch) then return end
-    if tr then
-      ext.activeChargeTrack = tr
-    end
-    syncJaneDoeConfigs()
-    if ext.jdCrystalAim then
-      local myHrp = ch:FindFirstChild("HumanoidRootPart")
-      local hum = ch:FindFirstChildOfClass("Humanoid")
-      if myHrp and hum and hum.Health > 0 then
-        ext.crystalThrowUntil = os.clock() + 0.75
-        applyCrystalAimFrame(myHrp, hum)
-        startCrystalAimWindow(false)
-      end
-    end
-    if ext.instantThread ~= nil then
-      return
-    end
-    ext.chargeSession += 1
-    local mySession = ext.chargeSession
-    ext.instantThread = task.spawn(function()
-      task.wait(0.13)
-      if ext.chargeSession ~= mySession or not __PLUS_GEN_ALIVE or _G.__NERG_KILLED or not ext.jdInstantCrystal then
-        if ext.chargeSession == mySession then ext.instantThread = nil end
-        return
-      end
-      local chNow = localPlayer.Character
-      if not isLocalJaneDoe(chNow) or not isChargeSessionActive(ext.activeChargeTrack) then
-        if ext.chargeSession == mySession then ext.instantThread = nil end
-        return
-      end
-      if ext.jdCrystalAim then
-        local myHrp = chNow:FindFirstChild("HumanoidRootPart")
-        local hum = chNow:FindFirstChildOfClass("Humanoid")
-        if myHrp and hum and hum.Health > 0 then
-          ext.crystalThrowUntil = os.clock() + 0.75
-          applyCrystalAimFrame(myHrp, hum)
-        end
-      end
-      sendCrystalReleasePacket()
-      for _ = 1, 2 do
-        task.wait(0.4)
-        if ext.chargeSession ~= mySession or not __PLUS_GEN_ALIVE or _G.__NERG_KILLED or not ext.jdInstantCrystal then
-          break
-        end
-        local chRetry = localPlayer.Character
-        if not isLocalJaneDoe(chRetry) or getChargeDisplayGui() == nil then
-          break
-        end
-        if ext.jdCrystalAim then
-          local myHrp = chRetry:FindFirstChild("HumanoidRootPart")
-          local hum = chRetry:FindFirstChildOfClass("Humanoid")
-          if myHrp and hum and hum.Health > 0 then
-            ext.crystalThrowUntil = os.clock() + 0.75
-            applyCrystalAimFrame(myHrp, hum)
-          end
-        end
-        sendCrystalReleasePacket()
-      end
-      if ext.chargeSession == mySession then
-        ext.instantThread = nil
-      end
-    end)
   end
 
   local JD_HATCHET_STEP = "NergJDHatchetAim"
@@ -10764,18 +10788,20 @@ do
     local function onChargeDisplayAdded(inst)
       if not (__PLUS_GEN_ALIVE and not _G.__NERG_KILLED) then return end
       if inst and inst.Name == "ChargeDisplay" and inst.Parent and inst.Parent.Name == "TemporaryUI" then
-        if ext.jdCrystalAim then
-          task.defer(startCrystalAimWindow, false)
-        end
         if ext.jdInstantCrystal then
-          task.defer(beginInstantSession, ext.activeChargeTrack)
+          syncJaneDoeConfigs()
+        end
+        if ext.jdCrystalAim then
+          startCrystalAimWindow(false)
         end
         if not hookedCdInsts[inst] then
           local ancConn
           ancConn = inst.AncestryChanged:Connect(function(_, parent)
             if not parent then
               ext.crystalCharging = false
-              cancelInstantSession()
+              if ext.jdCrystalAim then
+                ext.crystalThrowUntil = math.max(ext.crystalThrowUntil, os.clock() + 0.85)
+              end
               hookedCdInsts[inst] = nil
               if ancConn then
                 local c0 = ancConn
@@ -10904,22 +10930,21 @@ do
             local isAxe = (animId and ext.jdHatchetAnims[animId]) or animName:find("axe", 1, true) ~= nil or animName:find("hatchet", 1, true) ~= nil
 
             if isCharge then
+              if ext.jdInstantCrystal then
+                syncJaneDoeConfigs()
+              end
               if ext.jdCrystalAim then
                 startCrystalAimWindow(false)
-              end
-              if ext.jdInstantCrystal then
-                task.defer(beginInstantSession, track)
               end
               pcall(function()
                 track.Stopped:Once(function()
                   ext.crystalCharging = false
-                  if getChargeDisplayGui() == nil then
-                    cancelInstantSession()
+                  if ext.jdCrystalAim then
+                    ext.crystalThrowUntil = math.max(ext.crystalThrowUntil, os.clock() + 0.85)
                   end
                 end)
               end)
             elseif isThrow then
-              cancelInstantSession()
               if ext.jdCrystalAim then
                 startCrystalAimWindow(true)
               end
@@ -10937,8 +10962,8 @@ do
   local function syncCombatExtState()
     if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED then return end
     syncJaneDoeConfigs()
+    syncCrystalSilentAimHooks()
     if not ext.killerM1Aim then stopKillerM1Aim() end
-    if not ext.jdInstantCrystal then cancelInstantSession() end
     if not ext.jdCrystalAim then stopCrystalAim() end
     if not ext.jdHatchetAim then stopHatchetAim() end
     bindChargeDisplayWatchers()
@@ -10946,7 +10971,6 @@ do
       if not ext.mainCharConn then
         ext.mainCharConn = localPlayer.CharacterAdded:Connect(function(ch)
           if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED then return end
-          cancelInstantSession()
           clearExtCharConns()
           stopKillerM1Aim()
           stopCrystalAim()
@@ -10962,7 +10986,6 @@ do
         hookLocalCombatCharacter(localPlayer.Character)
       end
     else
-      cancelInstantSession()
       clearExtCharConns()
       if ext.mainCharConn then
         pcall(function() ext.mainCharConn:Disconnect() end)
@@ -10976,8 +10999,8 @@ do
     ext.jdInstantCrystal = false
     ext.jdCrystalAim = false
     ext.jdHatchetAim = false
-    cancelInstantSession()
     syncJaneDoeConfigs()
+    restoreCrystalSilentAimHooks()
     stopKillerM1Aim()
     stopCrystalAim()
     stopHatchetAim()
@@ -11046,7 +11069,7 @@ do
     local survivorTab = SKiller:Tab({ Title = "Survivor", Icon = "shield" })
     local jdSec = survivorTab:Section({ Title = "Jane Doe", Opened = true })
     CFG_UI["JDInstantCrystal"] = jdSec:Toggle({
-      Title = "Jane Doe: Instant Crystal Charge",
+      Title = "Instant Crystal Charge",
       Type = "Checkbox",
       Value = ext.jdInstantCrystal,
       Callback = function(v)
@@ -11055,7 +11078,7 @@ do
       end,
     })
     CFG_UI["JDCrystalAim"] = jdSec:Toggle({
-      Title = "Jane Doe: Crystal Aim",
+      Title = "Crystal Silent Aim",
       Type = "Checkbox",
       Value = ext.jdCrystalAim,
       Callback = function(v)
@@ -11064,7 +11087,7 @@ do
       end,
     })
     CFG_UI["JDHatchetAim"] = jdSec:Toggle({
-      Title = "Jane Doe: Hatchet Aim",
+      Title = "Hatchet Aim",
       Type = "Checkbox",
       Value = ext.jdHatchetAim,
       Callback = function(v)
@@ -12589,7 +12612,7 @@ end)
 
 pcall(function()
 	local _, pObj = infoTab:Paragraph({
-		Title = "NergPlus - Version : 3.3",
+		Title = "NergPlus - Version : 3.5.1",
 		Desc = "Make you look more way like a Pro Player ( if you know how to use it , ofc )",
 		Image = "zap",
 		ImageSize = 24,
