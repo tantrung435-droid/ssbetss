@@ -35,30 +35,34 @@ do
     pcall(prevUnload, "replaced by new instance")
     _G.__NERG_KILLED = nil
   end
-  local uirRoots = { (gethui and gethui()), game:GetService("CoreGui"), localPlayer and localPlayer:FindFirstChild("PlayerGui") }
-  local nergGuis = {
-    ["NergFK_TextTags"] = true, ["NergMobileAB"] = true, ["NergABToggle"] = true,
-    ["CinematicText"] = true, ["ForsakenDeviceESP"] = true, ["ForsakenAbilityESP"] = true,
-    ["NergAbsGui"] = true, ["NergDodgeGui"] = true, ["NergStaminaView"] = true, ["NergStatusHUD"] = true,
-    ["NergHBPreview"] = true,
-  }
-  for _, r in ipairs(uirRoots) do
-    if r then
-      for _, g in ipairs(r:GetChildren()) do
-        pcall(function()
-          if (g:IsA("ScreenGui") or g:IsA("Folder")) and (g.Name:find("WindUI") or nergGuis[g.Name]) then
-            g:Destroy()
-          end
-        end)
+  local function purgeNergDom()
+    local uirRoots = { (gethui and gethui()), game:GetService("CoreGui"), localPlayer and localPlayer:FindFirstChild("PlayerGui") }
+    local nergGuis = {
+      ["NergFK_TextTags"] = true, ["NergMobileAB"] = true, ["NergABToggle"] = true,
+      ["CinematicText"] = true, ["ForsakenDeviceESP"] = true, ["ForsakenAbilityESP"] = true,
+      ["NergAbsGui"] = true, ["NergDodgeGui"] = true, ["NergStaminaView"] = true, ["NergStatusHUD"] = true,
+      ["NergHBPreview"] = true,
+    }
+    for _, r in ipairs(uirRoots) do
+      if r then
+        for _, g in ipairs(r:GetChildren()) do
+          pcall(function()
+            if (g:IsA("ScreenGui") or g:IsA("Folder")) and (g.Name:find("WindUI") or nergGuis[g.Name]) then
+              g:Destroy()
+            end
+          end)
+        end
       end
     end
+    pcall(function()
+      local oldV = workspaceService:FindFirstChild("PlusVis_DLCHUB")
+      if oldV then oldV:Destroy() end
+      local oldB = workspaceService:FindFirstChild("NergABBoxes")
+      if oldB then oldB:Destroy() end
+    end)
   end
-  pcall(function()
-    local oldV = workspaceService:FindFirstChild("PlusVis_DLCHUB")
-    if oldV then oldV:Destroy() end
-    local oldB = workspaceService:FindFirstChild("NergABBoxes")
-    if oldB then oldB:Destroy() end
-  end)
+  rawset(_G, "__NERG_DOM_PURGE", purgeNergDom)
+  purgeNergDom()
   rawset(_G, "__NERG_BOOT_N", nil)
 end
 
@@ -2488,6 +2492,18 @@ do
         bb.extraX
       )
     end
+    local activeEnd = bb.activeUntil or bb.untilT
+    if nowT > activeEnd then
+      local fadeAlpha = math.clamp((nowT - activeEnd) / math.max(0.05, (bb.untilT or activeEnd) - activeEnd), 0, 1)
+      bb.part.Transparency = 0.475 + 0.50 * fadeAlpha
+      if bb.hl then
+        bb.hl.Transparency = 0.685 + 0.30 * fadeAlpha
+        bb.hl.Color3 = A742P_OUTLINE
+      end
+      return
+    end
+    bb.part.Transparency = 0.475
+    if bb.hl then bb.hl.Transparency = 0.685 end
     local touches = #workspaceService:GetPartsInPart(bb.part, a742pOverlap) > 0
     if bb.hl then bb.hl.Color3 = touches and VIS_RED or A742P_OUTLINE end
     if touches and not bb.fired then
@@ -2514,7 +2530,8 @@ do
         pcall(_G.__NERG_BLK_LOG.boxEnd, k, b, "NOFIRE")
       end
       b.baseX, b.baseY, b.baseZ = a742pB.X, a742pB.Y, a742pB.Z
-      b.untilT = now + 0.55
+      b.activeUntil = now + 0.35
+      b.untilT = now + 0.52
       b.minDist, b.maxExtraZ, b.maxExtraX, b.minDot, b.lastSpd = nil, nil, nil, nil, nil
       if b.firedAt and now - b.firedAt >= 0.5 then b.fired, b.firedAt = nil, nil end
       a742pEvalBoxNow(k, b, now)
@@ -2537,7 +2554,7 @@ do
     hl.ZIndex = 5
     hl.Parent = part
     part.Parent = a742pFolder
-    local newBox = { part = part, hl = hl, untilT = now + 0.55, zoff = A742P_ZOFF[base] or -1.2, baseX = a742pB.X, baseY = a742pB.Y, baseZ = a742pB.Z, curX = targetSize.X, curZ = targetSize.Z, extraX = 0, lastLookX = nil, lastLookZ = nil, lastDot = nil, lastPX = nil, lastPZ = nil, velBX = 0, velBZ = 0, lastEvalT = now, fired = nil, firedAt = nil }
+    local newBox = { part = part, hl = hl, activeUntil = now + 0.35, untilT = now + 0.52, zoff = A742P_ZOFF[base] or -1.2, baseX = a742pB.X, baseY = a742pB.Y, baseZ = a742pB.Z, curX = targetSize.X, curZ = targetSize.Z, extraX = 0, lastLookX = nil, lastLookZ = nil, lastDot = nil, lastPX = nil, lastPZ = nil, velBX = 0, velBZ = 0, lastEvalT = now, fired = nil, firedAt = nil }
     a742pBoxes[k] = newBox
     A663_LOG("GEOM-BOX", base, k.Name, "hitbox")
     a742pEvalBoxNow(k, newBox, now)
@@ -2652,24 +2669,27 @@ do
     hdr.Text = "HITBOX 3D PREVIEW (LIVE)"
     hdr.Parent = mainFrame
 
-    local dragging, dragStart, startPos = false, nil, nil
+    local dragging, dragInput, dragStart, startPos = false, nil, nil, nil
     local cBegan = mainFrame.InputBegan:Connect(function(inp)
+      if dragging then return end
       if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
         dragging = true
+        dragInput = inp
         dragStart = inp.Position
         startPos = mainFrame.Position
         local endConn
         endConn = inp.Changed:Connect(function()
-          if inp.UserInputState == Enum.UserInputState.End then
+          if inp == dragInput and (inp.UserInputState == Enum.UserInputState.End or inp.UserInputState == Enum.UserInputState.Cancel) then
             endConn:Disconnect()
             dragging = false
+            dragInput = nil
             previewSavedPos = mainFrame.Position
           end
         end)
       end
     end)
     local cChanged = userInputService.InputChanged:Connect(function(inp)
-      if dragging and dragStart and startPos and (inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch) then
+      if dragging and dragInput and dragStart and startPos and ((dragInput.UserInputType == Enum.UserInputType.Touch and inp == dragInput) or (dragInput.UserInputType == Enum.UserInputType.MouseButton1 and inp.UserInputType == Enum.UserInputType.MouseMovement)) then
         local cam = workspaceService.CurrentCamera
         local vp = cam and cam.ViewportSize or Vector2.new(1920, 1080)
         local d = inp.Position - dragStart
@@ -3542,6 +3562,29 @@ do
 	end
 
 	local function fn25(arg)
+		local myCh = localPlayer and localPlayer.Character
+		if myCh and myCh.Parent and myCh.Parent.Name == "Survivors" then
+			local myHrp = myCh:FindFirstChild("HumanoidRootPart")
+			local myHum = myCh:FindFirstChildOfClass("Humanoid")
+			if myHrp and (not myHum or myHum.Health > 0) and (myHrp.Position - arg).Magnitude < n4 then
+				return true
+			end
+		end
+		if next(tbl8) ~= nil then
+			for k, v3 in pairs(tbl8) do
+				if v3.Type == "Survivor" and k.Parent and (not v3.Hum or v3.Hum.Health > 0) then
+					local sPos = v3.LastPosition
+					if not sPos then
+						local sHrp = (v3._hrp and v3._hrp.Parent == k and v3._hrp) or k:FindFirstChild("HumanoidRootPart")
+						sPos = sHrp and sHrp.Position
+					end
+					if sPos and (sPos - arg).Magnitude < n4 then
+						return true
+					end
+				end
+			end
+			return false
+		end
 		local pf = workspace:FindFirstChild("Players")
 		local sf = pf and pf:FindFirstChild("Survivors")
 		if sf then
@@ -3552,23 +3595,6 @@ do
 					if sHrp and (not sHum or sHum.Health > 0) and (sHrp.Position - arg).Magnitude < n4 then
 						return true
 					end
-				end
-			end
-			return false
-		end
-		local myCh = localPlayer and localPlayer.Character
-		if myCh and myCh.Parent and myCh.Parent.Name == "Survivors" then
-			local myHrp = myCh:FindFirstChild("HumanoidRootPart")
-			local myHum = myCh:FindFirstChildOfClass("Humanoid")
-			if myHrp and (not myHum or myHum.Health > 0) and (myHrp.Position - arg).Magnitude < n4 then
-				return true
-			end
-		end
-		for k, v3 in pairs(tbl8) do
-			if v3.Type == "Survivor" and k.Parent and (not v3.Hum or v3.Hum.Health > 0) then
-				local humanoidRootPart = k:FindFirstChild("HumanoidRootPart")
-				if humanoidRootPart and (humanoidRootPart.Position - arg).Magnitude < n4 then
-					return true
 				end
 			end
 		end
@@ -4268,8 +4294,15 @@ do
 		local sprintSignal = hasSpeedSprint or hasFovSprint or flag5 or (not animator and isMovingSprintSpeed) or (isMovingSprintSpeed and (arg2.Hum == nil or arg2.Hum.WalkSpeed <= 29))
 		local isSprintingNow = (isSkating and flag4) or (sprintSignal and flag4 and not inAbilityDash)
 
-		if arg2.Type == "Killer" and isSprintingNow and not fn25(position) then
-			isSprintingNow = false
+		arg2._hrp = humanoidRootPart
+		if arg2.Type == "Killer" and isSprintingNow then
+			if not arg2._nearSurvAt or now2 - arg2._nearSurvAt >= 0.12 then
+				arg2._nearSurvAt = now2
+				arg2._nearSurv = fn25(position)
+			end
+			if not arg2._nearSurv then
+				isSprintingNow = false
+			end
 		end
 
 		local isSlasher = (arg2.CharType or arg2.Name) == "Slasher"
@@ -4495,10 +4528,10 @@ local fn33 = LPH_NO_VIRTUALIZE(function(delta)
 		end
 		for char, st in pairs(tbl8) do
 			local cp = char.Parent
-			if isLocalPlayChar(char) or not (cp and (cp.Name == "Survivors" or cp.Name == "Killers") and char:IsDescendantOf(workspace)) then pcall(function() RemovePlayerTagDrawing(char) end) continue end
+			if char == myChar or isLocalPlayChar(char) or not (cp and (cp.Name == "Survivors" or cp.Name == "Killers") and char:IsDescendantOf(workspace)) then pcall(RemovePlayerTagDrawing, char) continue end
 			fn31(char, st, delta)
 			local ab = st.AbilityState
-			local hrp = char:FindFirstChild("HumanoidRootPart")
+			local hrp = (st._hrp and st._hrp.Parent == char and st._hrp) or char:FindFirstChild("HumanoidRootPart")
 			if ab and hrp then
 				local cdRate = getHasteCooldownRate(char, st)
 				for k, ability in pairs(ab.Abilities) do
@@ -4681,6 +4714,7 @@ local fn33 = LPH_NO_VIRTUALIZE(function(delta)
 	local espFolderConns = {}
 	local espPlayersFolder = nil
 	local espPlayersConn = nil
+	local espMounting = setmetatable({}, { __mode = "k" })
 
 	local function clearEspFolderConn(tName)
 		local list = espFolderConns[tName]
@@ -4726,6 +4760,7 @@ local fn33 = LPH_NO_VIRTUALIZE(function(delta)
 
 		tbl7 = {}
 		tbl8 = {}
+		table.clear(espMounting)
 
 		if forsakenDeviceESP then
 			forsakenDeviceESP:Destroy()
@@ -4757,24 +4792,25 @@ local fn33 = LPH_NO_VIRTUALIZE(function(delta)
 		end
 
 		local function fn34(child)
+			if not (child and child:IsA("Model")) or espMounting[child] then return end
+			if isLocalPlayChar(child) then return end
+			espMounting[child] = true
 			task.spawn(function()
-				if child:IsA("Model") then
-					if isLocalPlayChar(child) then return end
-					local humanoidRootPart = child:FindFirstChild("HumanoidRootPart") or child:WaitForChild("HumanoidRootPart", 10)
-					local humanoid = child:FindFirstChildOfClass("Humanoid") or child:WaitForChild("Humanoid", 10)
-					local head = child:FindFirstChild("Head") or child:WaitForChild("Head", 10)
-					if isLocalPlayChar(child) then
-						pcall(RemovePlayerTagDrawing, child)
-						return
-					end
+				local humanoidRootPart = child:FindFirstChild("HumanoidRootPart") or child:WaitForChild("HumanoidRootPart", 10)
+				local humanoid = child:FindFirstChildOfClass("Humanoid") or child:WaitForChild("Humanoid", 10)
+				local head = child:FindFirstChild("Head") or child:WaitForChild("Head", 10)
+				espMounting[child] = nil
+				if isLocalPlayChar(child) then
+					pcall(RemovePlayerTagDrawing, child)
+					return
+				end
 
-					if flag and humanoidRootPart and humanoid and child.Parent and child:IsDescendantOf(workspace) then
-						if tbl.PlayersTagsEsp and not tbl7[child] then
-							CreatePlayerTagDrawing(child, child.Parent.Name == "Killers" and tbl.EspKillerColor or tbl.EspSurvivorsColor, humanoidRootPart, humanoid)
-						end
-						if not tbl8[child] then
-							fn30(child, humanoidRootPart, head, humanoid)
-						end
+				if flag and humanoidRootPart and humanoid and child.Parent and child:IsDescendantOf(workspace) then
+					if tbl.PlayersTagsEsp and not tbl7[child] then
+						CreatePlayerTagDrawing(child, child.Parent.Name == "Killers" and tbl.EspKillerColor or tbl.EspSurvivorsColor, humanoidRootPart, humanoid)
+					end
+					if not tbl8[child] then
+						fn30(child, humanoidRootPart, head, humanoid)
 					end
 				end
 			end)
@@ -4987,13 +5023,6 @@ end
 				tbl.PlayersTagsEsp = v and true or false
 				if v then
 					StartESPSystem()
-					if not forsakenDeviceESP then
-						forsakenDeviceESP = CoreGui:FindFirstChild("ForsakenDeviceESP") or Instance.new("ScreenGui")
-						forsakenDeviceESP.Name = "ForsakenDeviceESP"
-						forsakenDeviceESP:SetAttribute("GEN", 4)
-						forsakenDeviceESP.DisplayOrder = 10
-						forsakenDeviceESP.Parent = (gethui and gethui()) or CoreGui
-					end
 					local plFolder = workspace:FindFirstChild("Players")
 					if plFolder then
 						for _, teamName in ipairs({ "Killers", "Survivors" }) do
@@ -5020,7 +5049,6 @@ end
 						if v3.DeviceGuiFrame then pcall(function() v3.DeviceGuiFrame:Destroy() end) end
 						tbl7[k] = nil
 					end
-					if forsakenDeviceESP then forsakenDeviceESP:Destroy() forsakenDeviceESP = nil end
 				end
 				if syncEspWatchdogs then syncEspWatchdogs() end
 			end)
@@ -5180,7 +5208,7 @@ end
 		for _, g in ipairs(cg:GetChildren()) do
 			if g:IsA("Folder") and g.Name == "ForsakenAbilityESP" then
 				for _, bb in ipairs(g:GetChildren()) do
-					if bb:IsA("BillboardGui") and (not bb.Adornee or bb.Adornee.Parent == nil) then
+					if bb:IsA("BillboardGui") and (not bb.Adornee or not bb.Adornee:IsDescendantOf(workspace)) then
 						pcall(function() bb:Destroy() end)
 					end
 				end
@@ -5350,6 +5378,7 @@ do
 		if d:IsA("BasePart") then return d end
 		return nil
 	end
+	OBJ.baseOf = baseOf
 
 	local function findEntry(d)
 		if not (d:IsA("Model") or d:IsA("BasePart")) then return nil end
@@ -5842,11 +5871,41 @@ do
 		rescanAll()
 		syncObjActiveState()
 	end
+	local OBJ_TYPE_MAP = {
+		["Graffiti"] = "Graffiti",
+		["Taph Traps"] = "TaphTrap",
+		["Rituals"] = "Ritual",
+		["Builderman"] = "Builderman",
+		["Azure Traps"] = "AzureTrap",
+	}
 	function OBJ.setType(k, v)
 		local want = v and true or false
 		local was = OBJ.perType[k]
 		OBJ.perType[k] = want
 		if OBJ.master and want and not was then
+			scannedMasterFor = nil
+			pcall(ensureConns)
+		end
+		rescanAll()
+	end
+	function OBJ.setTypes(o)
+		local sel = {}
+		if type(o) == "table" then
+			for k, v in pairs(o) do
+				if type(k) == "number" and type(v) == "string" then sel[v] = true
+				elseif v == true and type(k) == "string" then sel[k] = true end
+			end
+		end
+		local needEnsure = false
+		for label, internalKey in pairs(OBJ_TYPE_MAP) do
+			local want = (sel[label] == true or sel[internalKey] == true)
+			local was = OBJ.perType[internalKey]
+			OBJ.perType[internalKey] = want
+			if OBJ.master and want and not was then
+				needEnsure = true
+			end
+		end
+		if needEnsure then
 			scannedMasterFor = nil
 			pcall(ensureConns)
 		end
@@ -5912,13 +5971,7 @@ do
 	local accTime = 0
 
 	local function getTargetPart(inst)
-		if not inst then return nil end
-		if inst:IsA("BasePart") then return inst end
-		if inst:IsA("Model") then return inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart", true) end
-		if inst:IsA("Tool") then
-			return inst:FindFirstChild("ItemRoot", true) or inst:FindFirstChild("Handle", true) or inst:FindFirstChildWhichIsA("BasePart", true)
-		end
-		return nil
+		return _G.NERG_OBJ and _G.NERG_OBJ.baseOf and _G.NERG_OBJ.baseOf(inst) or nil
 	end
 
 	local function isEntryStillValid(inst, rec)
@@ -6344,8 +6397,8 @@ do
 		local pf = workspace:FindFirstChild("Players")
 		projRayParams.FilterDescendantsInstances = pf and { pf } or {}
 		local prev = pos
-		local steps = 8
-		local maxT = 2.0
+		local steps = 18
+		local maxT = math.clamp(tonumber(p.Lifetime) or 5.5, 4.0, 7.0)
 		for i = 1, steps do
 			local t = (i / steps) * maxT
 			local nxt = pos + vel * t - Vector3.new(0, 0.5 * g * t * t, 0)
@@ -6367,7 +6420,7 @@ do
 		local live = m1.Projectiles
 		local liveN = 0
 		for _ in pairs(live) do liveN += 1 end
-		local maxAge = tonumber(P.maxAge) or 1.5
+		local maxAge = tonumber(P.maxAge) or 5.0
 		local nowP = os.clock()
 		for id, part in pairs(markers) do
 			if live[id] == nil then
@@ -6623,6 +6676,10 @@ do
 		table.clear(e.Visuals)
 		e.ChargeStart = nil
 		e.DashStart = nil
+		e.ChanceStartAt = nil
+		e.ChanceTrack = nil
+		e.ChanceLastPos = nil
+		e.ChanceStallTime = 0
 		e.Accum = 0
 	end
 
@@ -6667,9 +6724,8 @@ do
 		e.Phase = phase
 		local pos = root.Position
 		local lift = hum.HipHeight + root.Size.Y * 0.5 - 0.12
-		local function flat(v)
-			return v - Vector3.new(0, lift, 0)
-		end
+		local liftVec = Vector3.new(0, lift, 0)
+		local flatPos = pos - liftVec
 		local look = root.CFrame.LookVector * Vector3.new(1, 0, 1)
 		look = if look.Magnitude < 0.001 then Vector3.new(0, 0, -1) else look.Unit
 		if not e.Line then e.Line = visNew(e, COL, 0.45) end
@@ -6677,8 +6733,9 @@ do
 			if startT.TimePosition <= e.Windup + 0.2 then
 				local ws = speedCache[e.CacheKey] or math.max(0, hum.WalkSpeed)
 				local dst = pos + look * math.min(CAP, ws * e.Duration)
-				visDraw(e.Line, flat(pos), flat(dst))
-				ringDraw(e, flat(dst))
+				local flatDst = dst - liftVec
+				visDraw(e.Line, flatPos, flatDst)
+				ringDraw(e, flatDst)
 			else
 				for _, v in ipairs(e.Visuals) do
 					visClear(v)
@@ -6720,12 +6777,14 @@ do
 		e.Velocity = e.Velocity and e.Velocity:Lerp(vel, k) or vel
 		local remain = math.max(0, e.Duration - el)
 		local pred = pos + e.Velocity * remain
-		visDraw(e.Line, flat(pos), flat(pred))
-		ringDraw(e, flat(pred))
+		local flatPred = pred - liftVec
+		visDraw(e.Line, flatPos, flatPred)
+		ringDraw(e, flatPred)
 		if el >= 0.2 and el < e.Duration - 0.1 and now - e.SpeedSampleTime >= 0.05 then
 			e.SpeedSampleTime = now
 			local spd = e.Velocity.Magnitude
 			if spd > 1 and spd < 500 then
+				if #e.SpeedSamples >= 24 then table.remove(e.SpeedSamples, 1) end
 				table.insert(e.SpeedSamples, spd)
 				if #e.SpeedSamples >= 5 then
 					local srt = table.clone(e.SpeedSamples)
@@ -6738,7 +6797,7 @@ do
 			if #e.Trail < 80 then
 				local seg = visNew(e, COL_TRAIL, 0.3)
 				table.insert(e.Trail, seg)
-				visDraw(seg, flat(e.LastTrail), flat(pos))
+				visDraw(seg, e.LastTrail - liftVec, flatPos)
 			end
 			e.LastTrail = pos
 			e.LastSample = now
@@ -6766,9 +6825,34 @@ do
 			extraClear(e)
 			return
 		end
-		if e.Kind == "Chance" and mainT.TimePosition >= 0.9 then
-			extraClear(e)
-			return
+		if e.Kind == "Chance" then
+			local nowC = os.clock()
+			local tPos = mainT.TimePosition
+			if e.ChanceIgnoredTrack == mainT and (nowC - (e.ChanceIgnoredAt or 0)) < 15 and tPos >= (e.ChanceIgnoredPos or 0) - 0.05 then
+				extraClear(e)
+				return
+			end
+			if e.ChanceTrack ~= mainT or tPos < (e.ChanceLastPos or 0) - 0.08 then
+				e.ChanceTrack = mainT
+				e.ChanceStartAt = nowC
+				e.ChanceLastPos = tPos
+				e.ChanceStallTime = 0
+				e.ChanceIgnoredTrack = nil
+			else
+				if math.abs(tPos - (e.ChanceLastPos or 0)) < 0.001 then
+					e.ChanceStallTime = (e.ChanceStallTime or 0) + dt
+				else
+					e.ChanceStallTime = 0
+					e.ChanceLastPos = tPos
+				end
+			end
+			if tPos >= 0.9 or (nowC - (e.ChanceStartAt or nowC)) >= 1.15 or (e.ChanceStallTime or 0) >= 0.25 then
+				e.ChanceIgnoredTrack = mainT
+				e.ChanceIgnoredAt = nowC
+				e.ChanceIgnoredPos = tPos
+				extraClear(e)
+				return
+			end
 		end
 		if e.Kind == "JohnDoe" and mainT.TimePosition >= 3.6 then
 			extraClear(e)
@@ -7084,7 +7168,13 @@ do
 		local tracks = e._tracks or {}
 		if e.Cat then catStep(e.Cat, mdl, root, hum, tracks, dt) end
 		if e.Extra then extraStep(e.Extra, mdl, root, hum, tracks, dt) end
-		local active = {}
+		local active = e._active
+		if active then
+			table.clear(active)
+		else
+			active = {}
+			e._active = active
+		end
 		if alive and root and root:IsA("BasePart") and anim then
 			for _, tr in ipairs(tracks) do
 				local an = tr.Animation
@@ -7120,8 +7210,7 @@ do
 		end
 	end
 
-	function W.set(v)
-		W.on = v and true or false
+	local function clearWindupState()
 		if hbConn then
 			pcall(function() hbConn:Disconnect() end)
 			hbConn = nil
@@ -7133,6 +7222,11 @@ do
 			pcall(function() folder:Destroy() end)
 			folder = nil
 		end
+	end
+
+	function W.set(v)
+		W.on = v and true or false
+		clearWindupState()
 		if W.on then
 			newFolder()
 			acc = SCAN
@@ -7149,17 +7243,7 @@ do
 
 	function W.shutdown()
 		W.on = false
-		if hbConn then
-			pcall(function() hbConn:Disconnect() end)
-			hbConn = nil
-		end
-		for mdl in pairs(reg) do
-			dropEntry(mdl)
-		end
-		if folder then
-			pcall(function() folder:Destroy() end)
-			folder = nil
-		end
+		clearWindupState()
 	end
 
 	W.dbg = { t = 0, n = 0, f = false }
@@ -7258,6 +7342,16 @@ end
 					clearModelHighlight(mdl, false)
 				end
 			end
+			for mdl in pairs(tbl6rem) do
+				if not (mdl and mdl.Parent and mdl:IsDescendantOf(workspace)) then
+					clearModelHighlight(mdl, false)
+				end
+			end
+			for mdl in pairs(tbl6saved) do
+				if not (mdl and mdl.Parent and mdl:IsDescendantOf(workspace)) then
+					clearModelHighlight(mdl, false)
+				end
+			end
 		end
 		local wantHl = (tbl.KillerEsp == true or tbl.SurvivorsEsp == true or next(tbl6) ~= nil)
 		if not wantHl then
@@ -7276,6 +7370,16 @@ end
 					pcall(function()
 						pcall(reconcileTeam, "Killers", tbl.KillerEsp == true, tbl.EspKillerColor)
 						pcall(reconcileTeam, "Survivors", tbl.SurvivorsEsp == true, tbl.EspSurvivorsColor)
+						for mdl in pairs(tbl6rem) do
+							if not (mdl and mdl.Parent and mdl:IsDescendantOf(workspace)) then
+								clearModelHighlight(mdl, false)
+							end
+						end
+						for mdl in pairs(tbl6saved) do
+							if not (mdl and mdl.Parent and mdl:IsDescendantOf(workspace)) then
+								clearModelHighlight(mdl, false)
+							end
+						end
 						local cam = workspace.CurrentCamera
 						if not cam then return end
 						local cp = cam.CFrame.Position
@@ -7410,10 +7514,35 @@ end
 	local connection2 = nil
 	local connection3 = nil
 	local shadowConns = {}
+	local function unhookShadowChild(child, extraMdl)
+		local sc = shadowConns[child]
+		if sc then
+			shadowConns[child] = nil
+			pcall(function() sc:Disconnect() end)
+		end
+		if extraMdl then
+			clearModelHighlight(extraMdl, false)
+		end
+	end
+	local function bindShadowChild(child, onChildAdded, extraMdl)
+		unhookShadowChild(child, nil)
+		local cAdd = child.ChildAdded:Connect(onChildAdded)
+		local cAnc
+		cAnc = child.AncestryChanged:Connect(function(_, parent)
+			if not parent or not child:IsDescendantOf(workspace) then
+				unhookShadowChild(child, extraMdl)
+			end
+		end)
+		shadowConns[child] = {
+			Disconnect = function()
+				if cAdd then pcall(function() cAdd:Disconnect() end) cAdd = nil end
+				if cAnc then pcall(function() cAnc:Disconnect() end) cAnc = nil end
+			end,
+		}
+	end
 	local function clearShadowConns()
-		for i = #shadowConns, 1, -1 do
-			local sc = shadowConns[i]
-			shadowConns[i] = nil
+		for ch, sc in pairs(shadowConns) do
+			shadowConns[ch] = nil
 			pcall(function() sc:Disconnect() end)
 		end
 	end
@@ -7431,7 +7560,7 @@ end
 				child2.Parent = trailESPModel
 			end
 		end
-		shadowConns[#shadowConns + 1] = child.ChildAdded:Connect(function(child2)
+		bindShadowChild(child, function(child2)
 			if tbl.KillerEsp and child2:IsA("BasePart") and trailESPModel and trailESPModel.Parent then
 				task.defer(function()
 					if tbl.KillerEsp and child2.Parent == child and trailESPModel.Parent == child then
@@ -7440,7 +7569,7 @@ end
 					end
 				end)
 			end
-		end)
+		end, trailESPModel)
 		createHighlight2(trailESPModel, tbl.EspKillerColor)
 	end
 
@@ -7455,12 +7584,12 @@ end
 					createHighlight2(child2, tbl.EspKillerSupportColor)
 				end
 			end
-			shadowConns[#shadowConns + 1] = child.ChildAdded:Connect(function(child2)
+			bindShadowChild(child, function(child2)
 				if tbl.KillerEsp and child2.Name == "Shadow" then
 					child2.Transparency = 0
 					createHighlight2(child2, tbl.EspKillerSupportColor)
 				end
-			end)
+		end, nil)
 		elseif string.sub(child.Name, -12) == "JohnDoeTrail" then
 			hookJohnDoeTrail(child)
 		end
@@ -7707,8 +7836,8 @@ end
 
 SSystem = v1PRBLOCKWindow:Section({ Title = "Overview & Config", Opened = true })
 infoTab = SSystem:Tab({ Title = "Info", Icon = "info" })
-factTab = SSystem:Tab({ Title = "Fact", Icon = "lightbulb" })
-local SKiller = v1PRBLOCKWindow:Section({ Title = "Killer", Opened = true })
+factTab = SSystem:Tab({ Title = "Helper", Icon = "lightbulb" })
+local SKiller = v1PRBLOCKWindow:Section({ Title = "Character", Opened = true })
 local killerTab = SKiller:Tab({ Title = "Killer", Icon = "crosshair" })
 
 -- [A747] Anti Backstab (port) — event-driven · default OFF · full cleanup
@@ -8485,7 +8614,15 @@ do
     local conns = {}
     autoDodge.survConns[model] = conns
 
-    local hookedSounds = setmetatable({}, { __mode = "k" })
+    local sndConns = {}
+    conns[#conns + 1] = {
+      Disconnect = function()
+        for s, dropFn in pairs(sndConns) do
+          sndConns[s] = nil
+          pcall(dropFn)
+        end
+      end,
+    }
     local function checkSound(d)
       if not (autoDodge.on and d and d.Parent) then return end
       local num = d.SoundId and tostring(d.SoundId):match("%d+")
@@ -8494,14 +8631,25 @@ do
       end
     end
     local function bindSurvSound(d)
-      if not (d and d:IsA("Sound") and d.Parent) or hookedSounds[d] then return end
-      hookedSounds[d] = true
-      conns[#conns + 1] = d.Played:Connect(function() checkSound(d) end)
-      conns[#conns + 1] = d:GetPropertyChangedSignal("IsPlaying"):Connect(function()
+      if not (d and d:IsA("Sound") and d.Parent) or sndConns[d] then return end
+      local cPlay, cPlaying, cId, cAnc
+      local function dropSnd()
+        sndConns[d] = nil
+        if cPlay then pcall(function() cPlay:Disconnect() end) cPlay = nil end
+        if cPlaying then pcall(function() cPlaying:Disconnect() end) cPlaying = nil end
+        if cId then pcall(function() cId:Disconnect() end) cId = nil end
+        if cAnc then pcall(function() cAnc:Disconnect() end) cAnc = nil end
+      end
+      sndConns[d] = dropSnd
+      cPlay = d.Played:Connect(function() checkSound(d) end)
+      cPlaying = d:GetPropertyChangedSignal("IsPlaying"):Connect(function()
         if d.IsPlaying then checkSound(d) end
       end)
-      conns[#conns + 1] = d:GetPropertyChangedSignal("SoundId"):Connect(function()
+      cId = d:GetPropertyChangedSignal("SoundId"):Connect(function()
         if d.IsPlaying then checkSound(d) end
+      end)
+      cAnc = d.AncestryChanged:Connect(function(_, parent)
+        if not parent then dropSnd() end
       end)
       if d.IsPlaying then checkSound(d) end
     end
@@ -8688,7 +8836,7 @@ do
   -- Section UI Controls in killerTab
   local dodgeSec = killerTab:Section({ Title = "Auto Dodge", Opened = true })
   CFG_UI["AutoDodgeOn"] = dodgeSec:Toggle({
-    Title = "Auto Dodge (Raging Pace / 404)",
+    Title = "Auto Dodge",
     Type = "Checkbox",
     Value = autoDodge.on,
     Callback = function(v)
@@ -8778,6 +8926,12 @@ do
     netMod = nil,
     origFireServerConn = nil,
     hookedNet = false,
+    wallBlockedInDash = false,
+    wallHugNormal = nil,
+    wallHugTangent = nil,
+    wallHugAt = 0,
+    allowHeadOnCrash = false,
+    headOnCrashUntil = 0,
     novaConn = nil,
     novaAcc = 0,
     projMod = nil,
@@ -9412,6 +9566,105 @@ do
       pcall(function() runService:UnbindFromRenderStep("NergNoliAntiCrash") end)
     end
     noli.wallBlockedInDash = false
+    noli.wallHugNormal = nil
+    noli.wallHugTangent = nil
+    noli.wallHugAt = 0
+    noli.allowHeadOnCrash = false
+    noli.headOnCrashUntil = 0
+  end
+
+  local function flatNormalOf(hit)
+    if not hit then return nil end
+    local fn = Vector3.new(hit.Normal.X, 0, hit.Normal.Z)
+    if fn.Magnitude < 0.25 then return nil end
+    return fn.Unit
+  end
+
+  local function probeNoliHitboxWall(myHrp, ch)
+    local now = os.clock()
+    local pos = myHrp.Position
+    local hrpLv = myHrp.CFrame.LookVector
+    local boxLook = Vector3.new(hrpLv.X, 0, hrpLv.Z)
+    boxLook = (boxLook.Magnitude > 0.01) and boxLook.Unit or Vector3.new(0, 0, -1)
+    local boxRight = Vector3.new(-boxLook.Z, 0, boxLook.X)
+    local curVel = myHrp.AssemblyLinearVelocity
+    local curFlatVel = Vector3.new(curVel.X, 0, curVel.Z)
+    local curFlatSpd = curFlatVel.Magnitude
+    local moveDir = (curFlatSpd > 2.5) and curFlatVel.Unit or boxLook
+    refreshLosFilter(ch, nil)
+
+    if now <= (noli.headOnCrashUntil or 0) then
+      return true, nil, math.huge, moveDir, boxLook, curVel, curFlatSpd
+    end
+
+    local halfW = 1.65
+    local reachF = 3.2
+    local originC = pos
+    local originFL = pos - boxRight * halfW
+    local originFR = pos + boxRight * halfW
+    local hitC = workspaceService:Raycast(originC, boxLook * reachF, losRayParams)
+    local hitFL = workspaceService:Raycast(originFL, boxLook * reachF, losRayParams)
+    local hitFR = workspaceService:Raycast(originFR, boxLook * reachF, losRayParams)
+    local nC = flatNormalOf(hitC)
+    local nFL = flatNormalOf(hitFL)
+    local nFR = flatNormalOf(hitFR)
+    local distC = nC and (hitC.Position - originC).Magnitude or nil
+    local distFL = nFL and (hitFL.Position - originFL).Magnitude or nil
+    local distFR = nFR and (hitFR.Position - originFR).Magnitude or nil
+
+    local hitMove = (curFlatSpd > 4.0) and workspaceService:Raycast(pos, moveDir * 2.8, losRayParams) or nil
+    local nMove = flatNormalOf(hitMove)
+    local distMove = nMove and (hitMove.Position - pos).Magnitude or nil
+
+    local recentHug = (now - (noli.wallHugAt or 0)) <= 0.25 and noli.wallHugNormal ~= nil
+    local frontNorm = nC or nFL or nFR
+    local sameWallAsHug = recentHug and frontNorm ~= nil and (noli.wallHugNormal:Dot(frontNorm) >= 0.72)
+
+    local isDirectFrontFaceCrash = false
+    if not sameWallAsHug then
+      if nC and distC and distC <= 2.9 and boxLook:Dot(-nC) >= 0.93 and moveDir:Dot(-nC) >= 0.78 then
+        isDirectFrontFaceCrash = true
+      elseif nFL and nFR and distFL and distFR and distFL <= 2.8 and distFR <= 2.8 and math.abs(distFL - distFR) <= 0.55 and boxLook:Dot(-nFL) >= 0.88 then
+        isDirectFrontFaceCrash = true
+      elseif recentHug and nMove and distMove and distMove <= 2.4 and (noli.wallHugNormal:Dot(nMove) < 0.35) and moveDir:Dot(-nMove) >= 0.85 then
+        isDirectFrontFaceCrash = true
+      end
+    end
+    if isDirectFrontFaceCrash then
+      noli.headOnCrashUntil = now + 0.28
+      noli.allowHeadOnCrash = true
+      return true, nil, 0, moveDir, boxLook, curVel, curFlatSpd
+    end
+
+    local dirCL = (boxLook * 0.788 - boxRight * 0.615).Unit
+    local dirCR = (boxLook * 0.788 + boxRight * 0.615).Unit
+    local dirSL = (boxLook * 0.259 - boxRight * 0.966).Unit
+    local dirSR = (boxLook * 0.259 + boxRight * 0.966).Unit
+    local hitCL = workspaceService:Raycast(pos, dirCL * 2.35, losRayParams)
+    local hitCR = workspaceService:Raycast(pos, dirCR * 2.35, losRayParams)
+    local hitSL = workspaceService:Raycast(pos, dirSL * 2.15, losRayParams)
+    local hitSR = workspaceService:Raycast(pos, dirSR * 2.15, losRayParams)
+
+    local bestNormal, bestDist = nil, math.huge
+    local function considerHit(h, origPos, maxAllowed)
+      if not h then return end
+      local fn = flatNormalOf(h)
+      if not fn then return end
+      local d = (h.Position - origPos).Magnitude
+      if d > maxAllowed then return end
+      if d < bestDist then
+        bestDist = d
+        bestNormal = fn
+      end
+    end
+    considerHit(hitC, originC, 2.25)
+    considerHit(hitFL, originFL, 2.20)
+    considerHit(hitFR, originFR, 2.20)
+    considerHit(hitCL, pos, 2.20)
+    considerHit(hitCR, pos, 2.20)
+    considerHit(hitSL, pos, 2.05)
+    considerHit(hitSR, pos, 2.05)
+    return false, bestNormal, bestDist, moveDir, boxLook, curVel, curFlatSpd
   end
 
   local function noliAntiCrashStep()
@@ -9433,16 +9686,99 @@ do
         or noli.origDashSpeed
         or 60
       local minSpd = (cfgSpd / 3.5) + 3.5
-      local curVel = myHrp.AssemblyLinearVelocity
+
+      if noli.rushAim and noli.activeSteerDir then
+        noli.allowHeadOnCrash = false
+        noli.headOnCrashUntil = 0
+        local curVel0 = myHrp.AssemblyLinearVelocity
+        if curVel0.Magnitude <= minSpd then
+          local flat = noli.activeSteerDir
+          local openDir = findOpenSteerDir(myHrp.Position, ch, nil, flat, 6.5) or flat
+          myHrp.AssemblyLinearVelocity = Vector3.new(openDir.X * (minSpd + 2.5), curVel0.Y, openDir.Z * (minSpd + 2.5))
+        end
+        return
+      end
+
+      local isDirectFront, wallNormal, wallDist, moveDir, boxLook, curVel, curFlatSpd = probeNoliHitboxWall(myHrp, ch)
+      local cam = workspaceService.CurrentCamera
+      local camLv = (cam and cam.CFrame.LookVector) or boxLook
+      local camFlat = Vector3.new(camLv.X, 0, camLv.Z)
+      camFlat = (camFlat.Magnitude > 0.01) and camFlat.Unit or boxLook
+
+      if isDirectFront then
+        noli.allowHeadOnCrash = true
+        noli.wallHugNormal = nil
+        noli.wallHugTangent = nil
+        noli.wallHugAt = 0
+        return
+      end
+      noli.allowHeadOnCrash = false
+
+      local now = os.clock()
+      if wallNormal and wallDist <= 2.25 then
+        local t1 = Vector3.new(-wallNormal.Z, 0, wallNormal.X)
+        local t2 = -t1
+        local score1 = moveDir:Dot(t1) * 0.55 + camFlat:Dot(t1) * 0.45
+        local score2 = moveDir:Dot(t2) * 0.55 + camFlat:Dot(t2) * 0.45
+        if noli.wallHugTangent and (now - (noli.wallHugAt or 0)) <= 0.25 then
+          score1 = score1 + noli.wallHugTangent:Dot(t1) * 0.40
+          score2 = score2 + noli.wallHugTangent:Dot(t2) * 0.40
+        end
+        local t = (score1 >= score2) and t1 or t2
+
+        if camFlat:Dot(wallNormal) > 0.14 and boxLook:Dot(wallNormal) >= -0.05 then
+          noli.wallHugNormal = nil
+          noli.wallHugTangent = nil
+          if curFlatSpd <= minSpd + 3.0 then
+            local peelDir = (t * 0.65 + boxLook * 0.35)
+            peelDir = (peelDir.Magnitude > 0.01) and peelDir.Unit or boxLook
+            local wantSpd = math.max(curFlatSpd, minSpd + 4.5, cfgSpd * 0.62)
+            local curFlat = Vector3.new(curVel.X, 0, curVel.Z)
+            local blended = curFlat:Lerp(peelDir * wantSpd, 0.35)
+            myHrp.AssemblyLinearVelocity = Vector3.new(blended.X, curVel.Y, blended.Z)
+          end
+          return
+        end
+
+        local pressingIntoWall = (boxLook:Dot(-wallNormal) > 0.12)
+          or (moveDir:Dot(-wallNormal) > 0.08)
+          or (curVel.Magnitude <= minSpd + 3.5)
+        if pressingIntoWall then
+          noli.wallHugNormal = wallNormal
+          noli.wallHugTangent = t
+          noli.wallHugAt = now
+          local slideFloor = math.max(minSpd + 5.0, cfgSpd * 0.64)
+          if curFlatSpd < slideFloor or moveDir:Dot(t) < 0.55 then
+            local targetSpd = math.max(curFlatSpd, slideFloor)
+            local curFlat = Vector3.new(curVel.X, 0, curVel.Z)
+            local blended = curFlat:Lerp(t * targetSpd, 0.34)
+            myHrp.AssemblyLinearVelocity = Vector3.new(blended.X, curVel.Y, blended.Z)
+          end
+          return
+        end
+      end
+
+      if noli.wallHugNormal and (now - (noli.wallHugAt or 0)) <= 0.18 then
+        local inwardDir = -noli.wallHugNormal
+        if boxLook:Dot(inwardDir) > 0.22 and camFlat:Dot(inwardDir) > 0.18 then
+          local carryDir = (boxLook * 0.75 + camFlat * 0.25)
+          carryDir = (carryDir.Magnitude > 0.01) and carryDir.Unit or boxLook
+          local carrySpd = math.max(curFlatSpd, minSpd + 5.5, cfgSpd * 0.68)
+          local curFlat = Vector3.new(curVel.X, 0, curVel.Z)
+          local blended = curFlat:Lerp(carryDir * carrySpd, 0.28)
+          myHrp.AssemblyLinearVelocity = Vector3.new(blended.X, curVel.Y, blended.Z)
+          return
+        end
+      else
+        noli.wallHugNormal = nil
+        noli.wallHugTangent = nil
+      end
+
       if curVel.Magnitude <= minSpd then
-        local cam = workspaceService.CurrentCamera
-        local look = (noli.rushAim and noli.activeSteerDir)
-          or (cam and cam.CFrame.LookVector)
-          or myHrp.CFrame.LookVector
-        local flat = Vector3.new(look.X, 0, look.Z)
-        flat = (flat.Magnitude > 0.01) and flat.Unit or Vector3.new(0, 0, -1)
-        local openDir = findOpenSteerDir(myHrp.Position, ch, nil, flat, 6.5) or flat
-        myHrp.AssemblyLinearVelocity = Vector3.new(openDir.X * (minSpd + 2.5), curVel.Y, openDir.Z * (minSpd + 2.5))
+        local openDir = findOpenSteerDir(myHrp.Position, ch, nil, boxLook, 5.5) or boxLook
+        local curFlat = Vector3.new(curVel.X, 0, curVel.Z)
+        local blended = curFlat:Lerp(openDir * (minSpd + 3.5), 0.40)
+        myHrp.AssemblyLinearVelocity = Vector3.new(blended.X, curVel.Y, blended.Z)
       end
     elseif noli.wallBlockedInDash then
       noli.wallBlockedInDash = false
@@ -9460,9 +9796,14 @@ do
       if not noli.acBound then
         noli.acBound = true
         noli.wallBlockedInDash = false
+        noli.wallHugNormal = nil
+        noli.wallHugTangent = nil
+        noli.wallHugAt = 0
+        noli.allowHeadOnCrash = false
+        noli.headOnCrashUntil = 0
         pcall(function()
           runService:UnbindFromRenderStep("NergNoliAntiCrash")
-          runService:BindToRenderStep("NergNoliAntiCrash", Enum.RenderPriority.Character.Value, noliAntiCrashStep)
+          runService:BindToRenderStep("NergNoliAntiCrash", Enum.RenderPriority.Character.Value + 1, noliAntiCrashStep)
         end)
       end
     else
@@ -9568,6 +9909,19 @@ do
                     print(string.format("[NERG] VoidRushCollision held=%s", tostring(held)))
                   end
                   if held then
+                    local allowCrash = noli.allowHeadOnCrash or (os.clock() <= (noli.headOnCrashUntil or 0))
+                    if not allowCrash and not (noli.rushAim and noli.activeSteerDir) then
+                      local chNow = localPlayer.Character
+                      local hrpNow = chNow and chNow:FindFirstChild("HumanoidRootPart")
+                      if hrpNow then
+                        local directFront = probeNoliHitboxWall(hrpNow, chNow)
+                        if directFront then allowCrash = true end
+                      end
+                    end
+                    if allowCrash then
+                      noli.wallBlockedInDash = false
+                      return noli.origFireServerConn(selfArg, eventName, kind, ...)
+                    end
                     noli.wallBlockedInDash = true
                     return nil
                   end
@@ -9751,7 +10105,7 @@ do
     end,
   })
   CFG_UI["NoliTurnStr"] = noliSec:Slider({
-    Title = "Void Rush Turn Strength (1.0 - 16.0)",
+    Title = "Void Rush Turn Strength",
     Step = 0.5,
     Value = { Min = 1.0, Max = 16.0, Default = noli.turnStrength },
     Callback = function(n)
@@ -9760,7 +10114,7 @@ do
     end,
   })
   CFG_UI["NoliRushAim"] = noliSec:Toggle({
-    Title = "Void Rush Aimbot (Wall-Safe Pathfind)",
+    Title = "Void Rush Aimbot",
     Type = "Checkbox",
     Value = noli.rushAim,
     Callback = function(v)
@@ -9787,7 +10141,7 @@ do
     end,
   })
   CFG_UI["NoliAntiCrash"] = noliSec:Toggle({
-    Title = "Void Rush Anti-Crash (Wall Bypass)",
+    Title = "Void Rush Anti-Crash",
     Type = "Checkbox",
     Value = noli.antiCrash,
     Callback = function(v)
@@ -9822,7 +10176,7 @@ end
 
 -- [A752] Combat Extensions: Killer M1 Aimbot & Jane Doe Suite (Instant Crystal, Crystal Aim, Hatchet Aim)
 do
-  local EXPERIMENTAL_ON = { JaneDoe = false }
+  local EXPERIMENTAL_ON = { JaneDoe = true }
   local ext = {
     killerM1Aim = v2.get("killerM1Aim", false) and true or false,
     jdInstantCrystal = EXPERIMENTAL_ON.JaneDoe and (v2.get("jdInstantCrystal", false) and true or false) or false,
@@ -9830,13 +10184,9 @@ do
     jdHatchetAim = EXPERIMENTAL_ON.JaneDoe and (v2.get("jdHatchetAim", false) and true or false) or false,
     m1AimBound = false,
     m1AimUntil = 0,
-    crystalAimBound = false,
     crystalCharging = false,
     crystalChargeStartAt = 0,
     crystalThrowUntil = 0,
-    chargeSession = 0,
-    instantThread = nil,
-    activeChargeTrack = nil,
     hatchetAimBound = false,
     hatchetAimUntil = 0,
     savedCrystalConfigs = setmetatable({}, { __mode = "k" }),
@@ -9848,8 +10198,15 @@ do
     charConns = {},
     uiConns = {},
     mainCharConn = nil,
-    netMod = nil,
     actorsMod = nil,
+    mouseMod = nil,
+    origGetMousePos = nil,
+    origGetCamCF = nil,
+    hookedMouseMod = false,
+    utilMod = nil,
+    origUtilMousePos = nil,
+    origUtilCamCF = nil,
+    hookedUtilMod = false,
   }
 
   local M1_SKILL_BLACKLIST = {
@@ -9930,28 +10287,29 @@ do
     end)
   end
 
+  local CANONICAL_JD_CRYSTAL = {
+    ChannelTime = 0.2,
+    MinChargeTime = 0.25,
+    MaxChargeTime = 2.0,
+    MaximumHoldTime = 2.0,
+    ChargeSpeedMult = 0.75,
+  }
+
   local function patchSingleCrystalTable(crystalTbl, enable)
     if type(crystalTbl) ~= "table" then return end
-    local orig = ext.savedCrystalConfigs[crystalTbl]
-    if not orig then
-      orig = {
-        ChannelTime = crystalTbl.ChannelTime ~= nil and crystalTbl.ChannelTime or 0.2,
-        MinChargeTime = crystalTbl.MinChargeTime ~= nil and crystalTbl.MinChargeTime or 0.25,
-        MaxChargeTime = crystalTbl.MaxChargeTime ~= nil and crystalTbl.MaxChargeTime or 2,
-        ChargeSpeedMult = crystalTbl.ChargeSpeedMult ~= nil and crystalTbl.ChargeSpeedMult or 0.75,
-      }
-      ext.savedCrystalConfigs[crystalTbl] = orig
-    end
+    ext.savedCrystalConfigs[crystalTbl] = CANONICAL_JD_CRYSTAL
     if enable and __PLUS_GEN_ALIVE and not _G.__NERG_KILLED then
-      crystalTbl.ChannelTime = 0
-      crystalTbl.MinChargeTime = 0
-      crystalTbl.MaxChargeTime = 0.01
+      crystalTbl.ChannelTime = 0.15
+      crystalTbl.MinChargeTime = 0.25
+      crystalTbl.MaxChargeTime = 0.25
+      crystalTbl.MaximumHoldTime = 999999
       crystalTbl.ChargeSpeedMult = 1
     else
-      crystalTbl.ChannelTime = orig.ChannelTime
-      crystalTbl.MinChargeTime = orig.MinChargeTime
-      crystalTbl.MaxChargeTime = orig.MaxChargeTime
-      crystalTbl.ChargeSpeedMult = orig.ChargeSpeedMult
+      crystalTbl.ChannelTime = CANONICAL_JD_CRYSTAL.ChannelTime
+      crystalTbl.MinChargeTime = CANONICAL_JD_CRYSTAL.MinChargeTime
+      crystalTbl.MaxChargeTime = CANONICAL_JD_CRYSTAL.MaxChargeTime
+      crystalTbl.MaximumHoldTime = CANONICAL_JD_CRYSTAL.MaximumHoldTime
+      crystalTbl.ChargeSpeedMult = CANONICAL_JD_CRYSTAL.ChargeSpeedMult
     end
   end
 
@@ -10003,8 +10361,13 @@ do
       local curActors = ext.actorsMod and ext.actorsMod.CurrentActors
       if type(curActors) == "table" then
         for _, act in pairs(curActors) do
-          if type(act) == "table" and (act.Player == localPlayer or act.Rig == localPlayer.Character) and type(act.Config) == "table" and type(act.Config.Crystal) == "table" then
-            patchSingleCrystalTable(act.Config.Crystal, enable)
+          if type(act) == "table" and (act.Player == localPlayer or act.Rig == localPlayer.Character) then
+            if type(act.Config) == "table" and type(act.Config.Crystal) == "table" then
+              patchSingleCrystalTable(act.Config.Crystal, enable)
+            end
+            if enable and type(act.State) == "table" then
+              act.State.CrystalFullChargeTime = nil
+            end
           end
         end
       end
@@ -10122,7 +10485,7 @@ do
     end
   end
 
-  local JD_CRYSTAL_STEP = "NergJDCrystalAim"
+  local PITCH_COMP_ANGLE = -math.atan(1 / 3)
 
   local function getChargeDisplayGui()
     local pg = localPlayer:FindFirstChild("PlayerGui")
@@ -10135,226 +10498,239 @@ do
     return nil
   end
 
-  local function applyCrystalAimFrame(myHrp, hum)
-    local kHrp = findNearestLivingKiller(myHrp.Position, 180)
-    if not kHrp then return false end
-    local aimPoint = kHrp.Position
-    local flat = Vector3.new(aimPoint.X - myHrp.Position.X, 0, aimPoint.Z - myHrp.Position.Z)
-    if flat.Magnitude > 0.05 then
-      a724RotLock(hum, "jd_crystal")
-      pcall(function() myHrp.AssemblyAngularVelocity = Vector3.zero end)
-      myHrp.CFrame = CFrame.lookAt(myHrp.Position, Vector3.new(aimPoint.X, myHrp.Position.Y, aimPoint.Z))
+  local function getMyJaneDoeActor()
+    if not ext.actorsMod then
+      local okA, aMod = pcall(function()
+        return require(replicatedStorage.Modules.Gameplay.Actors)
+      end)
+      if okA and type(aMod) == "table" then ext.actorsMod = aMod end
     end
-    local cam = workspaceService.CurrentCamera
-    if cam then
-      local camPos = cam.CFrame.Position
-      if (aimPoint - camPos).Magnitude > 0.1 then
-        cam.CFrame = CFrame.lookAt(camPos, aimPoint)
+    local curActors = ext.actorsMod and ext.actorsMod.CurrentActors
+    if type(curActors) ~= "table" then return nil end
+    local myAct = curActors[localPlayer]
+    if type(myAct) == "table" then return myAct end
+    for _, act in pairs(curActors) do
+      if type(act) == "table" and (act.Player == localPlayer or act.Rig == localPlayer.Character) then
+        return act
       end
     end
-    return true
+    return nil
   end
 
-  local function stopCrystalAim()
-    local wasBound = ext.crystalAimBound
-    ext.crystalAimBound = false
-    ext.crystalCharging = false
-    ext.crystalThrowUntil = 0
-    pcall(function() runService:UnbindFromRenderStep(JD_CRYSTAL_STEP) end)
-    if wasBound or a724RotLocks["jd_crystal"] then
-      pcall(function()
-        local ch = localPlayer.Character
-        local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-        a724RotUnlock(hum, "jd_crystal")
-      end)
+  local function isCrystalAimActiveNow()
+    local now = os.clock()
+    if ext.crystalCharging and (now - ext.crystalChargeStartAt) > 12 then
+      ext.crystalCharging = false
     end
+    if ext.crystalCharging or now <= ext.crystalThrowUntil then
+      return true
+    end
+    if getChargeDisplayGui() ~= nil then
+      if not ext.crystalCharging then
+        ext.crystalCharging = true
+        ext.crystalChargeStartAt = now
+      end
+      return true
+    end
+    local act = getMyJaneDoeActor()
+    local st = act and act.State
+    if type(st) == "table" and st.IsCrystalEquipped == true then
+      return true
+    end
+    return false
   end
 
-  local function stepCrystalAim()
-    if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED or not ext.jdCrystalAim then
-      stopCrystalAim()
-      return
+  local function computeCrystalBallisticAimPos()
+    if not (__PLUS_GEN_ALIVE and not _G.__NERG_KILLED and ext.jdCrystalAim) then
+      return nil, nil, nil
     end
     local ch = localPlayer.Character
     if not isLocalJaneDoe(ch) then
-      stopCrystalAim()
-      return
+      return nil, nil, nil
     end
     local myHrp = ch:FindFirstChild("HumanoidRootPart")
     local hum = ch:FindFirstChildOfClass("Humanoid")
     if not (myHrp and hum and hum.Health > 0) then
-      stopCrystalAim()
+      return nil, nil, nil
+    end
+    if not isCrystalAimActiveNow() then
+      return nil, nil, nil
+    end
+    local kHrp = findNearestLivingKiller(myHrp.Position, 180)
+    if not kHrp then
+      return nil, nil, nil
+    end
+
+    local act = getMyJaneDoeActor()
+    local cCfg = act and type(act.Config) == "table" and act.Config.Crystal
+    local minSpd = (type(cCfg) == "table" and tonumber(cCfg.MinSpeed)) or 35
+    local maxSpd = (type(cCfg) == "table" and tonumber(cCfg.MaxSpeed)) or 250
+    local gravArc = (type(cCfg) == "table" and tonumber(cCfg.ProjectileArc)) or 40
+    local maxChargeT = (type(cCfg) == "table" and tonumber(cCfg.MaxChargeTime)) or 2.0
+    local chanT = (type(cCfg) == "table" and tonumber(cCfg.ChannelTime)) or 0.2
+
+    local chargeRatio = 1.0
+    if not ext.jdInstantCrystal and maxChargeT > 0.05 then
+      local elapsed = math.max(0, os.clock() - (ext.crystalChargeStartAt or os.clock()) - chanT)
+      chargeRatio = math.clamp(elapsed / maxChargeT, 0.125, 1.0)
+    end
+    local projSpd = minSpd + (maxSpd - minSpd) * chargeRatio
+    local liftY = (hum.HipHeight + (myHrp.Size.Y * 0.5)) * 0.5
+    local launchOrigin = myHrp.Position + Vector3.new(0, liftY, 0)
+
+    local kPos = kHrp.Position
+    local kVel = kHrp.AssemblyLinearVelocity
+    local flatVel = Vector3.new(kVel.X, 0, kVel.Z)
+    if flatVel.Magnitude > 85 then
+      flatVel = flatVel.Unit * 85
+    end
+    local dist0 = (kPos - launchOrigin).Magnitude
+    local tFlight = math.clamp(dist0 / math.max(projSpd, 35), 0.02, 2.2)
+    local predPos = kPos + flatVel * tFlight
+    tFlight = math.clamp((predPos - launchOrigin).Magnitude / math.max(projSpd, 35), 0.02, 2.2)
+    predPos = kPos + flatVel * tFlight
+    local gravDrop = 0.5 * gravArc * (tFlight * tFlight)
+    local aimPoint = predPos + Vector3.new(0, gravDrop, 0)
+    return aimPoint, launchOrigin, myHrp
+  end
+
+  local function buildCompensatedCamCF(aimPoint, myHrp, fallbackCF)
+    local cam = workspaceService.CurrentCamera
+    local camPos = (cam and cam.CFrame.Position)
+      or (typeof(fallbackCF) == "CFrame" and fallbackCF.Position)
+      or myHrp.Position
+    local delta = aimPoint - myHrp.Position
+    if delta.Magnitude < 0.05 then
+      return fallbackCF or (cam and cam.CFrame) or myHrp.CFrame
+    end
+    local dirToAim = delta.Unit
+    return CFrame.lookAt(camPos, camPos + dirToAim) * CFrame.Angles(PITCH_COMP_ANGLE, 0, 0)
+  end
+
+  local function restoreCrystalSilentAimHooks()
+    if ext.hookedMouseMod and ext.mouseMod then
+      pcall(function()
+        if ext.origGetMousePos then ext.mouseMod.GetMousePos = ext.origGetMousePos end
+        if ext.origGetCamCF then ext.mouseMod.GetCameraCFrame = ext.origGetCamCF end
+      end)
+      ext.hookedMouseMod = false
+    end
+    if ext.hookedUtilMod and ext.utilMod then
+      pcall(function()
+        if ext.origUtilMousePos then ext.utilMod.GetPlayerMousePosition = ext.origUtilMousePos end
+        if ext.origUtilCamCF then ext.utilMod.GetPlayerCameraCFrame = ext.origUtilCamCF end
+      end)
+      ext.hookedUtilMod = false
+    end
+  end
+
+  local function syncCrystalSilentAimHooks()
+    local want = ext.jdCrystalAim and __PLUS_GEN_ALIVE and not _G.__NERG_KILLED
+    if not want then
+      restoreCrystalSilentAimHooks()
       return
     end
-    local now = os.clock()
-    local cdGui = getChargeDisplayGui()
-    if cdGui then
-      ext.crystalCharging = true
-    elseif ext.crystalCharging and (now - ext.crystalChargeStartAt) > 2.4 then
-      ext.crystalCharging = false
-    end
-    local inThrowWindow = now <= ext.crystalThrowUntil
-    if not (ext.crystalCharging or inThrowWindow) then
-      stopCrystalAim()
-      return
-    end
-    if not applyCrystalAimFrame(myHrp, hum) then
-      if a724RotLocks["jd_crystal"] then
-        a724RotUnlock(hum, "jd_crystal")
+    pcall(function()
+      if not ext.mouseMod then
+        local sys = replicatedStorage:FindFirstChild("Systems")
+        local ply = sys and sys:FindFirstChild("Player")
+        local misc = ply and ply:FindFirstChild("Miscellaneous")
+        local mpMod = misc and misc:FindFirstChild("GetPlayerMousePosition")
+        if mpMod and mpMod:IsA("ModuleScript") then
+          local okM, mTbl = pcall(require, mpMod)
+          if okM and type(mTbl) == "table" then ext.mouseMod = mTbl end
+        end
       end
-    end
+      local mMod = ext.mouseMod
+      if type(mMod) == "table" and not ext.hookedMouseMod then
+        if type(mMod.GetMousePos) == "function" then
+          ext.origGetMousePos = ext.origGetMousePos or mMod.GetMousePos
+          mMod.GetMousePos = function(...)
+            local aimPoint = computeCrystalBallisticAimPos()
+            if aimPoint then
+              return aimPoint
+            end
+            return ext.origGetMousePos(...)
+          end
+        end
+        if type(mMod.GetCameraCFrame) == "function" then
+          ext.origGetCamCF = ext.origGetCamCF or mMod.GetCameraCFrame
+          mMod.GetCameraCFrame = function(...)
+            local origCF = ext.origGetCamCF(...)
+            local aimPoint, _, myHrp = computeCrystalBallisticAimPos()
+            if aimPoint and myHrp then
+              return buildCompensatedCamCF(aimPoint, myHrp, origCF)
+            end
+            return origCF
+          end
+        end
+        ext.hookedMouseMod = true
+      end
+    end)
+
+    pcall(function()
+      if not ext.utilMod then
+        local mods = replicatedStorage:FindFirstChild("Modules")
+        local utils = mods and mods:FindFirstChild("Utilities")
+        local uMod = utils and utils:FindFirstChild("Util")
+        if uMod and uMod:IsA("ModuleScript") then
+          local okU, uTbl = pcall(require, uMod)
+          if okU and type(uTbl) == "table" then ext.utilMod = uTbl end
+        end
+      end
+      local uMod = ext.utilMod
+      if type(uMod) == "table" and not ext.hookedUtilMod then
+        if type(uMod.GetPlayerMousePosition) == "function" then
+          ext.origUtilMousePos = ext.origUtilMousePos or uMod.GetPlayerMousePosition
+          uMod.GetPlayerMousePosition = function(selfArg, plrArg, ...)
+            local targetPlr = (plrArg == nil and typeof(selfArg) == "Instance") and selfArg or plrArg
+            if targetPlr == nil or targetPlr == localPlayer then
+              local aimPoint = computeCrystalBallisticAimPos()
+              if aimPoint then
+                return aimPoint
+              end
+            end
+            return ext.origUtilMousePos(selfArg, plrArg, ...)
+          end
+        end
+        if type(uMod.GetPlayerCameraCFrame) == "function" then
+          ext.origUtilCamCF = ext.origUtilCamCF or uMod.GetPlayerCameraCFrame
+          uMod.GetPlayerCameraCFrame = function(selfArg, plrArg, ...)
+            local origCF = ext.origUtilCamCF(selfArg, plrArg, ...)
+            local targetPlr = (plrArg == nil and typeof(selfArg) == "Instance") and selfArg or plrArg
+            if targetPlr == nil or targetPlr == localPlayer then
+              local aimPoint, _, myHrp = computeCrystalBallisticAimPos()
+              if aimPoint and myHrp then
+                return buildCompensatedCamCF(aimPoint, myHrp, origCF)
+              end
+            end
+            return origCF
+          end
+        end
+        ext.hookedUtilMod = true
+      end
+    end)
+  end
+
+  local function stopCrystalAim()
+    ext.crystalCharging = false
+    ext.crystalThrowUntil = 0
   end
 
   local function startCrystalAimWindow(isThrowPhase)
     if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED or not ext.jdCrystalAim then return end
     local ch = localPlayer.Character
     if not isLocalJaneDoe(ch) then return end
-    local myHrp = ch:FindFirstChild("HumanoidRootPart")
-    local hum = ch:FindFirstChildOfClass("Humanoid")
-    if not (myHrp and hum and hum.Health > 0) then return end
     local now = os.clock()
     if isThrowPhase then
       ext.crystalCharging = false
-      ext.crystalThrowUntil = now + 0.75
+      ext.crystalThrowUntil = now + 0.85
     else
       if not ext.crystalCharging then
         ext.crystalChargeStartAt = now
       end
       ext.crystalCharging = true
-      if ext.jdInstantCrystal then
-        ext.crystalThrowUntil = math.max(ext.crystalThrowUntil, now + 0.75)
-      end
     end
-    applyCrystalAimFrame(myHrp, hum)
-    if not ext.crystalAimBound then
-      ext.crystalAimBound = true
-      pcall(function()
-        runService:UnbindFromRenderStep(JD_CRYSTAL_STEP)
-        runService:BindToRenderStep(JD_CRYSTAL_STEP, Enum.RenderPriority.Camera.Value + 5, stepCrystalAim)
-      end)
-    end
-  end
-
-  local function cancelInstantSession()
-    ext.chargeSession += 1
-    ext.activeChargeTrack = nil
-    if ext.instantThread then
-      local th = ext.instantThread
-      ext.instantThread = nil
-      if coroutine.running() ~= th then
-        pcall(task.cancel, th)
-      end
-    end
-  end
-
-  local function sendCrystalReleasePacket()
-    pcall(function()
-      if not ext.netMod then
-        local okN, nMod = pcall(function()
-          return require(replicatedStorage.Modules.Network.Network)
-        end)
-        if not (okN and type(nMod) == "table") then
-          okN, nMod = pcall(function()
-            return require(replicatedStorage.Modules.Network)
-          end)
-        end
-        if okN and type(nMod) == "table" then
-          ext.netMod = nMod
-        end
-      end
-      local evName = localPlayer.Name .. "CrystalInput"
-      local net = ext.netMod
-      if type(net) == "table" and type(net.FireServerConnection) == "function" then
-        local okColon = pcall(function()
-          net:FireServerConnection(evName, "REMOTE_EVENT", 1)
-        end)
-        if not okColon then
-          pcall(function()
-            net.FireServerConnection(evName, "REMOTE_EVENT", 1)
-          end)
-        end
-      end
-    end)
-  end
-
-  local function isChargeSessionActive(tr)
-    if getChargeDisplayGui() ~= nil then
-      return true
-    end
-    if tr ~= nil then
-      local okP, playing = pcall(function() return tr.IsPlaying end)
-      if okP and playing == true then
-        return true
-      end
-    end
-    return false
-  end
-
-  local function beginInstantSession(tr)
-    if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED or not ext.jdInstantCrystal then return end
-    local ch = localPlayer.Character
-    if not isLocalJaneDoe(ch) then return end
-    if tr then
-      ext.activeChargeTrack = tr
-    end
-    syncJaneDoeConfigs()
-    if ext.jdCrystalAim then
-      local myHrp = ch:FindFirstChild("HumanoidRootPart")
-      local hum = ch:FindFirstChildOfClass("Humanoid")
-      if myHrp and hum and hum.Health > 0 then
-        ext.crystalThrowUntil = os.clock() + 0.75
-        applyCrystalAimFrame(myHrp, hum)
-        startCrystalAimWindow(false)
-      end
-    end
-    if ext.instantThread ~= nil then
-      return
-    end
-    ext.chargeSession += 1
-    local mySession = ext.chargeSession
-    ext.instantThread = task.spawn(function()
-      task.wait(0.13)
-      if ext.chargeSession ~= mySession or not __PLUS_GEN_ALIVE or _G.__NERG_KILLED or not ext.jdInstantCrystal then
-        if ext.chargeSession == mySession then ext.instantThread = nil end
-        return
-      end
-      local chNow = localPlayer.Character
-      if not isLocalJaneDoe(chNow) or not isChargeSessionActive(ext.activeChargeTrack) then
-        if ext.chargeSession == mySession then ext.instantThread = nil end
-        return
-      end
-      if ext.jdCrystalAim then
-        local myHrp = chNow:FindFirstChild("HumanoidRootPart")
-        local hum = chNow:FindFirstChildOfClass("Humanoid")
-        if myHrp and hum and hum.Health > 0 then
-          ext.crystalThrowUntil = os.clock() + 0.75
-          applyCrystalAimFrame(myHrp, hum)
-        end
-      end
-      sendCrystalReleasePacket()
-      for _ = 1, 2 do
-        task.wait(0.4)
-        if ext.chargeSession ~= mySession or not __PLUS_GEN_ALIVE or _G.__NERG_KILLED or not ext.jdInstantCrystal then
-          break
-        end
-        local chRetry = localPlayer.Character
-        if not isLocalJaneDoe(chRetry) or getChargeDisplayGui() == nil then
-          break
-        end
-        if ext.jdCrystalAim then
-          local myHrp = chRetry:FindFirstChild("HumanoidRootPart")
-          local hum = chRetry:FindFirstChildOfClass("Humanoid")
-          if myHrp and hum and hum.Health > 0 then
-            ext.crystalThrowUntil = os.clock() + 0.75
-            applyCrystalAimFrame(myHrp, hum)
-          end
-        end
-        sendCrystalReleasePacket()
-      end
-      if ext.chargeSession == mySession then
-        ext.instantThread = nil
-      end
-    end)
   end
 
   local JD_HATCHET_STEP = "NergJDHatchetAim"
@@ -10467,6 +10843,68 @@ do
     return false
   end
 
+  local function ensureUtilMod()
+    if ext.utilMod then return ext.utilMod end
+    pcall(function()
+      local mods = replicatedStorage:FindFirstChild("Modules")
+      local utils = mods and mods:FindFirstChild("Utilities")
+      local uMod = utils and utils:FindFirstChild("Util")
+      if uMod and uMod:IsA("ModuleScript") then
+        local okU, uTbl = pcall(require, uMod)
+        if okU and type(uTbl) == "table" then ext.utilMod = uTbl end
+      end
+    end)
+    return ext.utilMod
+  end
+
+  local function forceUnstuckJaneDoeCrystal()
+    if not (__PLUS_GEN_ALIVE and not _G.__NERG_KILLED) then return end
+    local ch = localPlayer.Character
+    if not isLocalJaneDoe(ch) then return end
+    if getChargeDisplayGui() ~= nil then return end
+    local act = getMyJaneDoeActor()
+    local st = act and act.State
+    if type(st) ~= "table" or st.IsCrystalEquipped ~= true then return end
+
+    st.IsCrystalEquipped = false
+    st.CrystalFullChargeTime = nil
+
+    pcall(function()
+      local anims = act.Animations
+      if type(anims) == "table" and anims.CrystalThrowCharge and type(anims.CrystalThrowCharge.Stop) == "function" then
+        anims.CrystalThrowCharge:Stop(0.1)
+      end
+    end)
+
+    pcall(function()
+      local hum = ch:FindFirstChildOfClass("Humanoid")
+      local an = hum and hum:FindFirstChildOfClass("Animator")
+      if an then
+        for _, tr in ipairs(an:GetPlayingAnimationTracks()) do
+          local aid = tr.Animation and tostring(tr.Animation.AnimationId):match("%d+")
+          local aName = ((tr.Animation and tr.Animation.Name) or tr.Name or ""):lower()
+          if (aid and ext.jdCrystalChargeAnims[aid]) or (aName:find("crystal", 1, true) and aName:find("charge", 1, true)) then
+            tr:Stop(0.1)
+          end
+        end
+      end
+    end)
+
+    pcall(function()
+      local uMod = ensureUtilMod()
+      if type(uMod) == "table" and type(uMod.ToggleLockForAbilityIcon) == "function" then
+        uMod:ToggleLockForAbilityIcon("Axe", "JaneDoeCrystalEquipped", false)
+      end
+    end)
+
+    pcall(function()
+      local beh = act.Behavior
+      if type(beh) == "table" and type(beh.lcl_OnCrystalUnequipped) == "function" then
+        beh:lcl_OnCrystalUnequipped(act)
+      end
+    end)
+  end
+
   local function bindChargeDisplayWatchers()
     clearExtUiConns()
     if not (__PLUS_GEN_ALIVE and not _G.__NERG_KILLED and (ext.jdInstantCrystal or ext.jdCrystalAim)) then return end
@@ -10475,18 +10913,21 @@ do
     local function onChargeDisplayAdded(inst)
       if not (__PLUS_GEN_ALIVE and not _G.__NERG_KILLED) then return end
       if inst and inst.Name == "ChargeDisplay" and inst.Parent and inst.Parent.Name == "TemporaryUI" then
-        if ext.jdCrystalAim then
-          task.defer(startCrystalAimWindow, false)
-        end
         if ext.jdInstantCrystal then
-          task.defer(beginInstantSession, ext.activeChargeTrack)
+          syncJaneDoeConfigs()
+        end
+        if ext.jdCrystalAim then
+          startCrystalAimWindow(false)
         end
         if not hookedCdInsts[inst] then
           local ancConn
           ancConn = inst.AncestryChanged:Connect(function(_, parent)
             if not parent then
               ext.crystalCharging = false
-              cancelInstantSession()
+              if ext.jdCrystalAim then
+                ext.crystalThrowUntil = math.max(ext.crystalThrowUntil, os.clock() + 0.85)
+              end
+              task.delay(0.38, forceUnstuckJaneDoeCrystal)
               hookedCdInsts[inst] = nil
               if ancConn then
                 local c0 = ancConn
@@ -10544,7 +10985,15 @@ do
         syncJaneDoeConfigs()
       end)
 
-      local hookedSnds = setmetatable({}, { __mode = "k" })
+      local localSndConns = {}
+      ext.charConns[#ext.charConns + 1] = {
+        Disconnect = function()
+          for s, dropFn in pairs(localSndConns) do
+            localSndConns[s] = nil
+            pcall(dropFn)
+          end
+        end,
+      }
       local function checkLocalM1Sound(snd)
         if not (ext.killerM1Aim and isLocalKiller(ch) and snd and snd.Parent) then return end
         local sid = tostring(snd.SoundId):match("%d+")
@@ -10553,29 +11002,42 @@ do
         end
       end
       local function bindLocalSound(d)
-        if not (d and d:IsA("Sound") and d.Parent) or hookedSnds[d] then return end
-        hookedSnds[d] = true
-        ext.charConns[#ext.charConns + 1] = d.Played:Connect(function()
+        if not (d and d:IsA("Sound") and d.Parent) or localSndConns[d] then return end
+        local cPlay, cPlaying, cId, cAnc
+        local function dropLocalSnd()
+          localSndConns[d] = nil
+          if cPlay then pcall(function() cPlay:Disconnect() end) cPlay = nil end
+          if cPlaying then pcall(function() cPlaying:Disconnect() end) cPlaying = nil end
+          if cId then pcall(function() cId:Disconnect() end) cId = nil end
+          if cAnc then pcall(function() cAnc:Disconnect() end) cAnc = nil end
+        end
+        localSndConns[d] = dropLocalSnd
+        cPlay = d.Played:Connect(function()
           checkLocalM1Sound(d)
         end)
-        ext.charConns[#ext.charConns + 1] = d:GetPropertyChangedSignal("IsPlaying"):Connect(function()
+        cPlaying = d:GetPropertyChangedSignal("IsPlaying"):Connect(function()
           if d.IsPlaying then checkLocalM1Sound(d) end
         end)
-        ext.charConns[#ext.charConns + 1] = d:GetPropertyChangedSignal("SoundId"):Connect(function()
+        cId = d:GetPropertyChangedSignal("SoundId"):Connect(function()
           if d.IsPlaying then checkLocalM1Sound(d) end
+        end)
+        cAnc = d.AncestryChanged:Connect(function(_, parent)
+          if not parent then dropLocalSnd() end
         end)
         if d.IsPlaying then checkLocalM1Sound(d) end
       end
 
-      for _, d in ipairs(ch:GetDescendants()) do
-        if d:IsA("Sound") then bindLocalSound(d) end
-      end
-      ext.charConns[#ext.charConns + 1] = ch.DescendantAdded:Connect(function(d)
-        if extCharSeq ~= mySeq then return end
-        if d:IsA("Sound") then
-          task.defer(bindLocalSound, d)
+      if ext.killerM1Aim and isLocalKiller(ch) then
+        for _, d in ipairs(ch:GetDescendants()) do
+          if d:IsA("Sound") then bindLocalSound(d) end
         end
-      end)
+        ext.charConns[#ext.charConns + 1] = ch.DescendantAdded:Connect(function(d)
+          if extCharSeq ~= mySeq then return end
+          if d:IsA("Sound") then
+            task.defer(bindLocalSound, d)
+          end
+        end)
+      end
 
       if animator then
         ext.charConns[#ext.charConns + 1] = animator.AnimationPlayed:Connect(function(track)
@@ -10596,22 +11058,22 @@ do
             local isAxe = (animId and ext.jdHatchetAnims[animId]) or animName:find("axe", 1, true) ~= nil or animName:find("hatchet", 1, true) ~= nil
 
             if isCharge then
+              if ext.jdInstantCrystal then
+                syncJaneDoeConfigs()
+              end
               if ext.jdCrystalAim then
                 startCrystalAimWindow(false)
-              end
-              if ext.jdInstantCrystal then
-                task.defer(beginInstantSession, track)
               end
               pcall(function()
                 track.Stopped:Once(function()
                   ext.crystalCharging = false
-                  if getChargeDisplayGui() == nil then
-                    cancelInstantSession()
+                  if ext.jdCrystalAim then
+                    ext.crystalThrowUntil = math.max(ext.crystalThrowUntil, os.clock() + 0.85)
                   end
+                  task.delay(0.38, forceUnstuckJaneDoeCrystal)
                 end)
               end)
             elseif isThrow then
-              cancelInstantSession()
               if ext.jdCrystalAim then
                 startCrystalAimWindow(true)
               end
@@ -10629,8 +11091,8 @@ do
   local function syncCombatExtState()
     if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED then return end
     syncJaneDoeConfigs()
+    syncCrystalSilentAimHooks()
     if not ext.killerM1Aim then stopKillerM1Aim() end
-    if not ext.jdInstantCrystal then cancelInstantSession() end
     if not ext.jdCrystalAim then stopCrystalAim() end
     if not ext.jdHatchetAim then stopHatchetAim() end
     bindChargeDisplayWatchers()
@@ -10638,7 +11100,6 @@ do
       if not ext.mainCharConn then
         ext.mainCharConn = localPlayer.CharacterAdded:Connect(function(ch)
           if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED then return end
-          cancelInstantSession()
           clearExtCharConns()
           stopKillerM1Aim()
           stopCrystalAim()
@@ -10654,7 +11115,6 @@ do
         hookLocalCombatCharacter(localPlayer.Character)
       end
     else
-      cancelInstantSession()
       clearExtCharConns()
       if ext.mainCharConn then
         pcall(function() ext.mainCharConn:Disconnect() end)
@@ -10668,8 +11128,8 @@ do
     ext.jdInstantCrystal = false
     ext.jdCrystalAim = false
     ext.jdHatchetAim = false
-    cancelInstantSession()
     syncJaneDoeConfigs()
+    restoreCrystalSilentAimHooks()
     stopKillerM1Aim()
     stopCrystalAim()
     stopHatchetAim()
@@ -10725,7 +11185,7 @@ do
 
   local m1AimSec = killerTab:Section({ Title = "M1 Aimbot", Opened = true })
   CFG_UI["KillerM1Aim"] = m1AimSec:Toggle({
-    Title = "Killer: M1 Aimbot",
+    Title = "M1 Aimbot",
     Type = "Checkbox",
     Value = ext.killerM1Aim,
     Callback = function(v)
@@ -10738,7 +11198,7 @@ do
     local survivorTab = SKiller:Tab({ Title = "Survivor", Icon = "shield" })
     local jdSec = survivorTab:Section({ Title = "Jane Doe", Opened = true })
     CFG_UI["JDInstantCrystal"] = jdSec:Toggle({
-      Title = "Jane Doe: Instant Crystal Charge",
+      Title = "Instant Crystal Charge",
       Type = "Checkbox",
       Value = ext.jdInstantCrystal,
       Callback = function(v)
@@ -10747,7 +11207,7 @@ do
       end,
     })
     CFG_UI["JDCrystalAim"] = jdSec:Toggle({
-      Title = "Jane Doe: Crystal Aim",
+      Title = "Crystal Silent Aim",
       Type = "Checkbox",
       Value = ext.jdCrystalAim,
       Callback = function(v)
@@ -10756,7 +11216,7 @@ do
       end,
     })
     CFG_UI["JDHatchetAim"] = jdSec:Toggle({
-      Title = "Jane Doe: Hatchet Aim",
+      Title = "Hatchet Aim",
       Type = "Checkbox",
       Value = ext.jdHatchetAim,
       Callback = function(v)
@@ -10782,6 +11242,9 @@ local camCore = {
   keep = false,
   on = v2.get("camFovOn", false) and true or false,
   bound = false,
+  pushing = false,
+  fovPropConn = nil,
+  camChangedConn = nil,
 }
 local function readDefaultFov()
   local pd = localPlayer:FindFirstChild("PlayerData")
@@ -10797,6 +11260,24 @@ local function readDefaultFov()
   end
   return 70
 end
+local function writeGameBaseFov(val)
+  pcall(function()
+    local pd = localPlayer:FindFirstChild("PlayerData")
+    local st = pd and pd:FindFirstChild("Settings")
+    local gm = st and st:FindFirstChild("Game")
+    local fv = (gm and gm:FindFirstChild("FieldOfView")) or (pd and pd:FindFirstChild("FieldOfView", true))
+    if fv and (fv:IsA("NumberValue") or fv:IsA("IntValue")) then
+      fv.Value = val
+    end
+  end)
+  pcall(function()
+    local ch = localPlayer.Character
+    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+    if hum and hum:GetAttribute("BaseFOV") ~= nil then
+      hum:SetAttribute("BaseFOV", val)
+    end
+  end)
+end
 pcall(function()
   local defFov = readDefaultFov()
   camCore.origFov = defFov
@@ -10805,10 +11286,26 @@ pcall(function()
   if v2.get("camZoomVal", nil) == nil then camCore.zoom = defZoom end
 end)
 local function camPushFov()
+  if camCore.pushing or not camCore.on then return end
   local c0 = workspaceService.CurrentCamera
-  if c0 and c0.FieldOfView ~= camCore.fov then
-    c0.FieldOfView = camCore.fov
+  if c0 and math.abs(c0.FieldOfView - camCore.fov) > 0.05 then
+    camCore.pushing = true
+    pcall(function() c0.FieldOfView = camCore.fov end)
+    camCore.pushing = false
   end
+end
+local function bindCameraFovSignal(cam)
+  if camCore.fovPropConn then
+    pcall(function() camCore.fovPropConn:Disconnect() end)
+    camCore.fovPropConn = nil
+  end
+  if not (cam and camCore.on) then return end
+  camCore.fovPropConn = cam:GetPropertyChangedSignal("FieldOfView"):Connect(function()
+    if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED or not camCore.on or camCore.pushing then return end
+    if math.abs(cam.FieldOfView - camCore.fov) > 0.05 then
+      camPushFov()
+    end
+  end)
 end
 local function setCustomFov(v)
   local want = v and true or false
@@ -10818,13 +11315,23 @@ local function setCustomFov(v)
       camCore.origFov = readDefaultFov()
     end
     camCore.on = true
+    writeGameBaseFov(camCore.fov)
     if not camCore.bound then
       camCore.bound = true
       pcall(function()
-        runService:BindToRenderStep("NergCamFov", Enum.RenderPriority.Camera.Value + 1, function()
+        runService:UnbindFromRenderStep("NergCamFov")
+        runService:BindToRenderStep("NergCamFov", Enum.RenderPriority.Last.Value + 99, function()
           if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED or not camCore.on then return end
           camPushFov()
         end)
+      end)
+    end
+    bindCameraFovSignal(cam)
+    if not camCore.camChangedConn then
+      camCore.camChangedConn = workspaceService:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+        if not __PLUS_GEN_ALIVE or _G.__NERG_KILLED or not camCore.on then return end
+        bindCameraFovSignal(workspaceService.CurrentCamera)
+        camPushFov()
       end)
     end
     camPushFov()
@@ -10834,7 +11341,16 @@ local function setCustomFov(v)
       camCore.bound = false
       pcall(function() runService:UnbindFromRenderStep("NergCamFov") end)
     end
-    local restoreFov = readDefaultFov() or camCore.origFov or 70
+    if camCore.fovPropConn then
+      pcall(function() camCore.fovPropConn:Disconnect() end)
+      camCore.fovPropConn = nil
+    end
+    if camCore.camChangedConn then
+      pcall(function() camCore.camChangedConn:Disconnect() end)
+      camCore.camChangedConn = nil
+    end
+    local restoreFov = camCore.origFov or 70
+    writeGameBaseFov(restoreFov)
     if cam then
       pcall(function() cam.FieldOfView = restoreFov end)
     end
@@ -10842,7 +11358,10 @@ local function setCustomFov(v)
 end
 local function setCamFovVal(n)
   camCore.fov = math.clamp(tonumber(n) or 70, 60, 120)
-  if camCore.on then camPushFov() end
+  if camCore.on then
+    writeGameBaseFov(camCore.fov)
+    camPushFov()
+  end
 end
 local function setCamZoomVal(n)
   camCore.zoom = math.clamp(tonumber(n) or 12, 12, 128)
@@ -10901,7 +11420,21 @@ SCombat = v1PRBLOCKWindow:Section({ Title = "Combat", Opened = true })
 blockTab = SCombat:Tab({ Title = "AutoBlock", Icon = "shield" })
 hdtTab = SCombat:Tab({ Title = "HDT", Icon = "magnet" })
 local punchTab = SCombat:Tab({ Title = "Punch", Icon = "hand-fist" })
-local stamCore = { run = false, conns = {}, neg = nil, origMod = nil, origChar = nil, memo = { m = nil, t = 0 }, fire = { v = nil, t = 0 }, val = { max = 100, loss = 10, gain = 20, min = 0, sprint = 26, inf = false }, view = { conn = nil, dragConns = {}, pos = nil, gui = nil, lbl = nil, lastV = nil, lastM = nil }, mgmt = { conn = nil, charConn = nil, on = false, pct = 10, locked = false } }
+local stamCore = {
+	run = false,
+	statsApplied = false,
+	conns = {},
+	neg = nil,
+	origMod = nil,
+	origChar = nil,
+	memo = { m = nil, t = 0 },
+	fire = { v = nil, t = 0 },
+	val = { inf = false },
+	surv = { on = false, max = 100, min = 0, loss = 10, gain = 20, sprint = 26 },
+	killer = { on = false, max = 110, min = 0, loss = 9.5, gain = 21, sprint = 28 },
+	view = { conn = nil, dragConns = {}, pos = nil, gui = nil, lbl = nil, lastV = nil, lastM = nil, sim = nil },
+	mgmt = { conn = nil, charConn = nil, on = false, pct = 10, locked = false },
+}
 function stamCore.guard()
 	local ch = localPlayer.Character
 	if not ch then return true end
@@ -10917,9 +11450,32 @@ function stamCore.mod()
 	if ok and mod then stamCore.memo.m, stamCore.memo.t = mod, now return mod end
 	return nil
 end
+function stamCore.activeRoleCfg()
+	local ch = localPlayer.Character
+	local p = ch and ch.Parent
+	local pName = p and p.Name
+	if pName == "Survivors" then
+		return stamCore.surv
+	elseif pName == "Killers" then
+		return stamCore.killer
+	end
+	return nil
+end
+function stamCore.calcSprintMult(mod)
+	local mult = 1
+	if mod and type(mod.SprintMultipliers) == "table" then
+		for _, m in pairs(mod.SprintMultipliers) do
+			if type(m) == "number" then mult = mult * m end
+		end
+	end
+	return mult
+end
 function stamCore.captureOrig(mod)
 	local ch = localPlayer.Character
-	if not mod or not mod.DefaultsSet then return end
+	local p = ch and ch.Parent
+	local pName = p and p.Name
+	if not ch or (pName ~= "Survivors" and pName ~= "Killers") then return end
+	if not mod or not (mod.Character == ch or mod.DefaultsSet == true) then return end
 	if not stamCore.origMod or stamCore.origChar ~= ch then
 		stamCore.origChar = ch
 		stamCore.origMod = {
@@ -10928,53 +11484,89 @@ function stamCore.captureOrig(mod)
 			loss = mod.StaminaLoss,
 			gain = mod.StaminaGain,
 			sprint = mod.SprintSpeed,
+			curSprint = mod.CurrentSprintSpeed,
 		}
 	end
 end
-function stamCore.restoreMod()
+function stamCore.restoreStatsOnly(mod)
 	pcall(function()
-		local mod = stamCore.mod()
+		mod = mod or stamCore.mod()
 		if not mod then return end
-		mod.StaminaLossDisabled = false
 		local o = stamCore.origMod
 		if o then
 			if o.max ~= nil then mod.MaxStamina = o.max end
 			if o.min ~= nil then mod.MinStamina = o.min end
 			if o.loss ~= nil then mod.StaminaLoss = o.loss end
 			if o.gain ~= nil then mod.StaminaGain = o.gain end
-			if o.sprint ~= nil then mod.SprintSpeed = o.sprint end
+			if o.sprint ~= nil then
+				local mult = stamCore.calcSprintMult(mod)
+				local prevCur = mod.CurrentSprintSpeed or mod.SprintSpeed
+				local targetCur = o.sprint * mult
+				mod.SprintSpeed = o.sprint
+				mod.CurrentSprintSpeed = targetCur
+				if prevCur ~= targetCur then
+					pcall(function() mod:Resync() end)
+				end
+			end
 		else
 			mod.MinStamina = 0
 		end
 		if type(mod.Stamina) == "number" and type(mod.MaxStamina) == "number" then
 			mod.Stamina = math.clamp(mod.Stamina, 0, mod.MaxStamina)
 		end
+		stamCore.statsApplied = false
+	end)
+end
+function stamCore.restoreMod()
+	pcall(function()
+		local mod = stamCore.mod()
+		if not mod then return end
+		mod.StaminaLossDisabled = false
+		stamCore.restoreStatsOnly(mod)
 	end)
 end
 function stamCore.apply(mod)
-	stamCore.captureOrig(mod)
-	local o = stamCore.origMod
-	local effMax, effLoss, effGain, effSprint = stamCore.val.max, stamCore.val.loss, stamCore.val.gain, stamCore.val.sprint
-	local chA = localPlayer.Character
-	if chA and chA.Parent and chA.Parent.Name == "Killers" and stamCore.val.max == 100 and stamCore.val.loss == 10 and stamCore.val.gain == 20 and stamCore.val.sprint == 26 then
-		effMax = (o and o.max) or 110
-		effLoss = (o and o.loss) or 9.5
-		effGain = (o and o.gain) or 21
-		effSprint = nil
+	local ch = localPlayer.Character
+	if ch ~= stamCore.origChar then
+		stamCore.origMod = nil
+		stamCore.origChar = nil
+		stamCore.statsApplied = false
 	end
-	mod.StaminaLoss = effLoss
-	mod.StaminaGain = effGain
-	mod.MinStamina = stamCore.val.min
-	mod.MaxStamina = effMax
-	if effSprint then mod.SprintSpeed = effSprint end
+	stamCore.captureOrig(mod)
+	local roleCfg = stamCore.activeRoleCfg()
+	if roleCfg and roleCfg.on then
+		local effMax = roleCfg.max
+		local effMin = roleCfg.min
+		local effLoss = roleCfg.loss
+		local effGain = roleCfg.gain
+		local effSprint = roleCfg.sprint
+		mod.StaminaLoss = effLoss
+		mod.StaminaGain = effGain
+		mod.MinStamina = effMin
+		mod.MaxStamina = effMax
+		if type(effSprint) == "number" and effSprint > 0 then
+			local mult = stamCore.calcSprintMult(mod)
+			local targetCur = effSprint * mult
+			local prevCur = mod.CurrentSprintSpeed or mod.SprintSpeed
+			mod.SprintSpeed = effSprint
+			mod.CurrentSprintSpeed = targetCur
+			if prevCur ~= targetCur and mod.IsSprinting == true then
+				pcall(function() mod:Resync() end)
+			end
+		end
+		stamCore.statsApplied = true
+	elseif stamCore.statsApplied then
+		stamCore.restoreStatsOnly(mod)
+	end
 	mod.StaminaLossDisabled = stamCore.val.inf
 	if stamCore.val.inf then
-		mod.Stamina = effMax
+		local capMax = tonumber(mod.MaxStamina) or (roleCfg and roleCfg.on and roleCfg.max) or 100
+		mod.Stamina = capMax
 		if mod.__staminaChangedEvent then
 			local now = tick()
 			if mod.Stamina ~= stamCore.fire.v or now - stamCore.fire.t >= 0.25 then
 				stamCore.fire.v, stamCore.fire.t = mod.Stamina, now
-				pcall(function() mod.__staminaChangedEvent:Fire(effMax) end)
+				pcall(function() mod.__staminaChangedEvent:Fire(capMax) end)
 			end
 		end
 	end
@@ -10996,7 +11588,11 @@ function stamCore.start()
 	end))
 	table.insert(stamCore.conns, runService.Heartbeat:Connect(function(delta)
 		if stamCore.guard() then stamCore.neg = nil return end
-		if stamCore.val.inf or stamCore.val.min >= 0 then return end
+		local activeCfg = stamCore.activeRoleCfg()
+		if not (activeCfg and activeCfg.on) or stamCore.val.inf or activeCfg.min >= 0 then
+			stamCore.neg = nil
+			return
+		end
 		local mod = stamCore.mod()
 		if not (mod and mod.DefaultsSet) or type(mod.Stamina) ~= "number" then return end
 		local st = mod.Stamina
@@ -11011,11 +11607,11 @@ function stamCore.start()
 		local nv = stamCore.neg or 0
 		if nv > 0 then nv = 0 end
 		if isSpr then
-			nv = nv - stamCore.val.loss * (delta or 0.0166666666666667)
+			nv = nv - activeCfg.loss * (delta or 0.0166666666666667)
 		else
-			nv = nv + stamCore.val.gain * (delta or 0.0166666666666667)
+			nv = nv + activeCfg.gain * (delta or 0.0166666666666667)
 		end
-		nv = math.clamp(nv, stamCore.val.min, stamCore.val.max)
+		nv = math.clamp(nv, activeCfg.min, activeCfg.max)
 		mod.Stamina = nv
 		if mod.__staminaChangedEvent then
 			pcall(function() mod.__staminaChangedEvent:Fire(nv) end)
@@ -11024,36 +11620,60 @@ function stamCore.start()
 	end))
 end
 function stamCore.poke()
+	if not stamCore.val.inf then
+		pcall(function()
+			local mod = stamCore.mod()
+			if mod then mod.StaminaLossDisabled = false end
+		end)
+	end
+	local roleCfg = stamCore.activeRoleCfg()
+	if not (roleCfg and roleCfg.on) and stamCore.statsApplied then
+		stamCore.restoreStatsOnly()
+	end
 	if not stamCore.run then
-		if not stamCore.val.inf then
-			pcall(function()
-				local mod = stamCore.mod()
-				if mod then mod.StaminaLossDisabled = false end
-			end)
-		end
 		return
 	end
 	if stamCore.guard() then return end
 	local mod = stamCore.mod()
 	if mod and mod.DefaultsSet then stamCore.apply(mod) end
 end
+function stamCore.syncLoop()
+	local want = (stamCore.val.inf == true) or (stamCore.surv.on == true) or (stamCore.killer.on == true)
+	if want then
+		if not stamCore.run then
+			stamCore.start()
+		end
+		stamCore.poke()
+	else
+		if stamCore.run then
+			stamCore.stop()
+		else
+			stamCore.restoreMod()
+		end
+	end
+end
 function stamCore.resetDefaults()
-	stamCore.val.max, stamCore.val.loss, stamCore.val.gain = 100, 10, 20
-	stamCore.val.min, stamCore.val.sprint, stamCore.val.inf = 0, 26, false
+	stamCore.val.inf = false
+	stamCore.surv.on, stamCore.surv.max, stamCore.surv.min, stamCore.surv.loss, stamCore.surv.gain, stamCore.surv.sprint = false, 100, 0, 10, 20, 26
+	stamCore.killer.on, stamCore.killer.max, stamCore.killer.min, stamCore.killer.loss, stamCore.killer.gain, stamCore.killer.sprint = false, 110, 0, 9.5, 21, 28
 	stamCore.mgmt.on = false
 	stamCore.mgmt.pct = 10
 	stamCore.mgmtStop()
 	stamCore.viewStop()
 	stamCore.stop()
 	pcall(function()
+		local prevBoot = uiBoot
+		uiBoot = true
 		local mapUi = {
-			StamCtl = false, StamInf = false, StamView = false, StamMgOn = false,
-			StamMgPct = "10", StamMax = "100", StamMin = "0", StamLoss = "10", StamGain = "20", StamSprint = "26",
+			StamInf = false, StamView = false, StamMgOn = false, StamMgPct = "10",
+			StamCtl = false, StamSprint = "26", StamGain = "20", StamLoss = "10", StamMax = "100", StamMin = "0",
+			StamKCtl = false, StamKSprint = "28", StamKGain = "21", StamKLoss = "9.5", StamKMax = "110", StamKMin = "0",
 		}
 		for k, val in pairs(mapUi) do
 			local ctrl = CFG_UI and CFG_UI[k]
 			if ctrl and ctrl.Set then pcall(function() ctrl:Set(val) end) end
 		end
+		uiBoot = prevBoot
 	end)
 end
 function stamCore.viewStop()
@@ -11094,24 +11714,27 @@ function stamCore.viewStart()
 	corner.Parent = lbl
 	lbl.Parent = gui
 	stamCore.view.gui, stamCore.view.lbl = gui, lbl
-	local vDrag, vStart, vPos0 = false, nil, nil
+	local vDrag, vDragInput, vStart, vPos0 = false, nil, nil, nil
 	stamCore.view.dragConns[#stamCore.view.dragConns + 1] = lbl.InputBegan:Connect(function(inp)
+		if vDrag then return end
 		if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
 			vDrag = true
+			vDragInput = inp
 			vStart = inp.Position
 			vPos0 = lbl.Position
 			local endC
 			endC = inp.Changed:Connect(function()
-				if inp.UserInputState == Enum.UserInputState.End then
+				if inp == vDragInput and (inp.UserInputState == Enum.UserInputState.End or inp.UserInputState == Enum.UserInputState.Cancel) then
 					endC:Disconnect()
 					vDrag = false
+					vDragInput = nil
 					stamCore.view.pos = lbl.Position
 				end
 			end)
 		end
 	end)
 	stamCore.view.dragConns[#stamCore.view.dragConns + 1] = userInputService.InputChanged:Connect(function(inp)
-		if vDrag and vStart and vPos0 and (inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch) then
+		if vDrag and vDragInput and vStart and vPos0 and ((vDragInput.UserInputType == Enum.UserInputType.Touch and inp == vDragInput) or (vDragInput.UserInputType == Enum.UserInputType.MouseButton1 and inp.UserInputType == Enum.UserInputType.MouseMovement)) then
 			local cam = workspaceService.CurrentCamera
 			local vp = cam and cam.ViewportSize or Vector2.new(1920, 1080)
 			local d = inp.Position - vStart
@@ -11134,7 +11757,7 @@ function stamCore.viewStart()
 		end
 		local m = math.floor(mod.MaxStamina)
 		local v
-		if stamCore.run and stamCore.val.inf then
+		if stamCore.val.inf then
 			local sv = stamCore.view.sim
 			if not sv then
 				sv = { v = mod.Stamina, pen = false, tur = 0, wasSpr = false }
@@ -11143,8 +11766,8 @@ function stamCore.viewStart()
 			local ch = localPlayer.Character
 			local root = ch and ch:FindFirstChild("HumanoidRootPart")
 			local isK = ch and ch.Parent and ch.Parent.Name == "Killers"
-			local sLoss = isK and 9.5 or 10
-			local sGain = isK and 21 or 20
+			local sLoss = tonumber(mod.StaminaLoss) or (isK and 9.5 or 10)
+			local sGain = tonumber(mod.StaminaGain) or (isK and 21 or 20)
 			if root then
 				local linVel = root.AssemblyLinearVelocity
 				local flatVelMag = Vector3.new(linVel.X, 0, linVel.Z).Magnitude
@@ -11284,27 +11907,20 @@ function stamCore.mgmtStart()
 		end
 	end)
 end
-local stamSec = staminaTab:Section({ Title = "Stamina", Icon = "zap" })
-CFG_UI["StamCtl"] = stamSec:Toggle({
-  Title = "Stamina Control",
-  Type = "Checkbox",
-  Value = false,
-  Callback = function(v)
-    if uiBoot then return end
-    if v then stamCore.start() else stamCore.stop() end
-    pcall(function() windUI:Notify({ Title = "Stamina", Content = v and "control on" or "control off", Duration = 3, Icon = "zap" }) end)
-  end,
-})
-CFG_UI["StamInf"] = stamSec:Toggle({
+local stamCoreSec = staminaTab:Section({ Title = "Stamina — Core & HUD", Icon = "zap", Opened = true })
+CFG_UI["StamInf"] = stamCoreSec:Toggle({
   Title = "Infinite Stamina",
   Icon = "infinity",
   Value = false,
   Callback = function(v)
     stamCore.val.inf = v and true or false
-    if not uiBoot then stamCore.poke() end
+    if not uiBoot then
+      stamCore.syncLoop()
+      pcall(function() windUI:Notify({ Title = "Stamina", Content = stamCore.val.inf and "infinite stamina on" or "infinite stamina off", Duration = 3, Icon = "infinity" }) end)
+    end
   end,
 })
-CFG_UI["StamView"] = stamSec:Toggle({
+CFG_UI["StamView"] = stamCoreSec:Toggle({
   Title = "Legit Stamina View",
   Icon = "activity",
   Value = false,
@@ -11313,7 +11929,7 @@ CFG_UI["StamView"] = stamSec:Toggle({
     if v then stamCore.viewStart() else stamCore.viewStop() end
   end,
 })
-CFG_UI["StamMgOn"] = stamSec:Toggle({
+CFG_UI["StamMgOn"] = stamCoreSec:Toggle({
   Title = "Sprint Management",
   Icon = "gauge",
   Value = false,
@@ -11324,7 +11940,7 @@ CFG_UI["StamMgOn"] = stamSec:Toggle({
     pcall(function() windUI:Notify({ Title = "Stamina", Content = v and ("management on (" .. stamCore.mgmt.pct .. "%)") or "management off", Duration = 3, Icon = "gauge" }) end)
   end,
 })
-CFG_UI["StamMgPct"] = stamSec:Input({
+CFG_UI["StamMgPct"] = stamCoreSec:Input({
   Title = "Disable Sprint at %",
   Value = "10",
   InputIcon = "gauge",
@@ -11338,76 +11954,21 @@ CFG_UI["StamMgPct"] = stamSec:Input({
     end
   end,
 })
-CFG_UI["StamMax"] = stamSec:Input({
-  Title = "Max Stamina",
-  Value = "100",
-  InputIcon = "zap",
-  Type = "Input",
-  Placeholder = "100",
-  Callback = function(val)
-    local num = tonumber(val)
-    if num then
-      stamCore.val.max = num
-      if not uiBoot then
-        stamCore.poke()
-        pcall(function() windUI:Notify({ Title = "Stamina", Content = "max: " .. num, Duration = 3, Icon = "zap" }) end)
-      end
+local stamSurvSec = staminaTab:Section({ Title = "Survivor Stamina", Icon = "shield", Opened = true })
+CFG_UI["StamCtl"] = stamSurvSec:Toggle({
+  Title = "Survivor Stamina Control",
+  Type = "Checkbox",
+  Value = false,
+  Callback = function(v)
+    stamCore.surv.on = v and true or false
+    if not uiBoot then
+      stamCore.syncLoop()
+      pcall(function() windUI:Notify({ Title = "Survivor Stamina", Content = stamCore.surv.on and "control on" or "control off", Duration = 3, Icon = "shield" }) end)
     end
   end,
 })
-CFG_UI["StamMin"] = stamSec:Input({
-  Title = "Min Stamina",
-  Value = "0",
-  InputIcon = "minus",
-  Type = "Input",
-  Placeholder = "-100",
-  Callback = function(val)
-    local num = tonumber(val)
-    if num then
-      stamCore.val.min = num
-      if not uiBoot then
-        stamCore.poke()
-        pcall(function() windUI:Notify({ Title = "Stamina", Content = "min: " .. num, Duration = 3, Icon = "minus" }) end)
-      end
-    end
-  end,
-})
-CFG_UI["StamLoss"] = stamSec:Input({
-  Title = "Stamina Loss",
-  Value = "10",
-  InputIcon = "trending-down",
-  Type = "Input",
-  Placeholder = "10",
-  Callback = function(val)
-    local num = tonumber(val)
-    if num then
-      stamCore.val.loss = num
-      if not uiBoot then
-        stamCore.poke()
-        pcall(function() windUI:Notify({ Title = "Stamina", Content = "loss: " .. num, Duration = 3, Icon = "trending-down" }) end)
-      end
-    end
-  end,
-})
-CFG_UI["StamGain"] = stamSec:Input({
-  Title = "Stamina Gain",
-  Value = "20",
-  InputIcon = "trending-up",
-  Type = "Input",
-  Placeholder = "20",
-  Callback = function(val)
-    local num = tonumber(val)
-    if num then
-      stamCore.val.gain = num
-      if not uiBoot then
-        stamCore.poke()
-        pcall(function() windUI:Notify({ Title = "Stamina", Content = "gain: " .. num, Duration = 3, Icon = "trending-up" }) end)
-      end
-    end
-  end,
-})
-CFG_UI["StamSprint"] = stamSec:Input({
-  Title = "Sprint Speed",
+CFG_UI["StamSprint"] = stamSurvSec:Input({
+  Title = "Survivor Sprint Speed",
   Value = "26",
   InputIcon = "bird",
   Type = "Input",
@@ -11415,16 +11976,182 @@ CFG_UI["StamSprint"] = stamSec:Input({
   Callback = function(val)
     local num = tonumber(val)
     if num then
-      stamCore.val.sprint = num
+      stamCore.surv.sprint = num
       if not uiBoot then
         stamCore.poke()
-        pcall(function() windUI:Notify({ Title = "Stamina", Content = "speed: " .. num, Duration = 3, Icon = "bird" }) end)
+        pcall(function() windUI:Notify({ Title = "Survivor Stamina", Content = "speed: " .. num, Duration = 3, Icon = "bird" }) end)
       end
     end
   end,
 })
-CFG_UI["StamReset"] = stamSec:Button({
-  Title = "Reset Stamina to Defaults",
+CFG_UI["StamGain"] = stamSurvSec:Input({
+  Title = "Survivor Stamina Gain",
+  Value = "20",
+  InputIcon = "trending-up",
+  Type = "Input",
+  Placeholder = "20",
+  Callback = function(val)
+    local num = tonumber(val)
+    if num then
+      stamCore.surv.gain = num
+      if not uiBoot then
+        stamCore.poke()
+        pcall(function() windUI:Notify({ Title = "Survivor Stamina", Content = "gain: " .. num, Duration = 3, Icon = "trending-up" }) end)
+      end
+    end
+  end,
+})
+CFG_UI["StamLoss"] = stamSurvSec:Input({
+  Title = "Survivor Stamina Loss",
+  Value = "10",
+  InputIcon = "trending-down",
+  Type = "Input",
+  Placeholder = "10",
+  Callback = function(val)
+    local num = tonumber(val)
+    if num then
+      stamCore.surv.loss = num
+      if not uiBoot then
+        stamCore.poke()
+        pcall(function() windUI:Notify({ Title = "Survivor Stamina", Content = "loss: " .. num, Duration = 3, Icon = "trending-down" }) end)
+      end
+    end
+  end,
+})
+CFG_UI["StamMax"] = stamSurvSec:Input({
+  Title = "Survivor Max Stamina",
+  Value = "100",
+  InputIcon = "zap",
+  Type = "Input",
+  Placeholder = "100",
+  Callback = function(val)
+    local num = tonumber(val)
+    if num then
+      stamCore.surv.max = num
+      if not uiBoot then
+        stamCore.poke()
+        pcall(function() windUI:Notify({ Title = "Survivor Stamina", Content = "max: " .. num, Duration = 3, Icon = "zap" }) end)
+      end
+    end
+  end,
+})
+CFG_UI["StamMin"] = stamSurvSec:Input({
+  Title = "Survivor Min Stamina",
+  Value = "0",
+  InputIcon = "minus",
+  Type = "Input",
+  Placeholder = "-100",
+  Callback = function(val)
+    local num = tonumber(val)
+    if num then
+      stamCore.surv.min = num
+      if not uiBoot then
+        stamCore.poke()
+        pcall(function() windUI:Notify({ Title = "Survivor Stamina", Content = "min: " .. num, Duration = 3, Icon = "minus" }) end)
+      end
+    end
+  end,
+})
+local stamKillerSec = staminaTab:Section({ Title = "Killer Stamina", Icon = "crosshair", Opened = true })
+CFG_UI["StamKCtl"] = stamKillerSec:Toggle({
+  Title = "Killer Stamina Control",
+  Type = "Checkbox",
+  Value = false,
+  Callback = function(v)
+    stamCore.killer.on = v and true or false
+    if not uiBoot then
+      stamCore.syncLoop()
+      pcall(function() windUI:Notify({ Title = "Killer Stamina", Content = stamCore.killer.on and "control on" or "control off", Duration = 3, Icon = "crosshair" }) end)
+    end
+  end,
+})
+CFG_UI["StamKSprint"] = stamKillerSec:Input({
+  Title = "Killer Sprint Speed",
+  Value = "28",
+  InputIcon = "bird",
+  Type = "Input",
+  Placeholder = "28",
+  Callback = function(val)
+    local num = tonumber(val)
+    if num then
+      stamCore.killer.sprint = num
+      if not uiBoot then
+        stamCore.poke()
+        pcall(function() windUI:Notify({ Title = "Killer Stamina", Content = "speed: " .. num, Duration = 3, Icon = "bird" }) end)
+      end
+    end
+  end,
+})
+CFG_UI["StamKGain"] = stamKillerSec:Input({
+  Title = "Killer Stamina Gain",
+  Value = "21",
+  InputIcon = "trending-up",
+  Type = "Input",
+  Placeholder = "21",
+  Callback = function(val)
+    local num = tonumber(val)
+    if num then
+      stamCore.killer.gain = num
+      if not uiBoot then
+        stamCore.poke()
+        pcall(function() windUI:Notify({ Title = "Killer Stamina", Content = "gain: " .. num, Duration = 3, Icon = "trending-up" }) end)
+      end
+    end
+  end,
+})
+CFG_UI["StamKLoss"] = stamKillerSec:Input({
+  Title = "Killer Stamina Loss",
+  Value = "9.5",
+  InputIcon = "trending-down",
+  Type = "Input",
+  Placeholder = "9.5",
+  Callback = function(val)
+    local num = tonumber(val)
+    if num then
+      stamCore.killer.loss = num
+      if not uiBoot then
+        stamCore.poke()
+        pcall(function() windUI:Notify({ Title = "Killer Stamina", Content = "loss: " .. num, Duration = 3, Icon = "trending-down" }) end)
+      end
+    end
+  end,
+})
+CFG_UI["StamKMax"] = stamKillerSec:Input({
+  Title = "Killer Max Stamina",
+  Value = "110",
+  InputIcon = "zap",
+  Type = "Input",
+  Placeholder = "110",
+  Callback = function(val)
+    local num = tonumber(val)
+    if num then
+      stamCore.killer.max = num
+      if not uiBoot then
+        stamCore.poke()
+        pcall(function() windUI:Notify({ Title = "Killer Stamina", Content = "max: " .. num, Duration = 3, Icon = "zap" }) end)
+      end
+    end
+  end,
+})
+CFG_UI["StamKMin"] = stamKillerSec:Input({
+  Title = "Killer Min Stamina",
+  Value = "0",
+  InputIcon = "minus",
+  Type = "Input",
+  Placeholder = "-100",
+  Callback = function(val)
+    local num = tonumber(val)
+    if num then
+      stamCore.killer.min = num
+      if not uiBoot then
+        stamCore.poke()
+        pcall(function() windUI:Notify({ Title = "Killer Stamina", Content = "min: " .. num, Duration = 3, Icon = "minus" }) end)
+      end
+    end
+  end,
+})
+CFG_UI["StamReset"] = stamKillerSec:Button({
+  Title = "Reset All Stamina to Defaults",
   Justify = "Center",
   Callback = function()
     stamCore.resetDefaults()
@@ -11478,17 +12205,20 @@ do
 			_G.__NERG_BLK_LOG.toggleAB(not autoBlock, true)
 		end
 	end
-	local abDrag, abStart, abPos0, abMoved = false, nil, nil, false
+	local abDrag, abDragInput, abStart, abPos0, abMoved = false, nil, nil, nil, false
 	a742jBeganConn = abBtn.InputBegan:Connect(function(input)
+		if abDrag then return end
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			abDrag, abMoved = true, false
+			abDragInput = input
 			abStart = input.Position
 			abPos0 = abBtn.Position
 			local changedConn
 			changedConn = input.Changed:Connect(function()
-				if input.UserInputState == Enum.UserInputState.End then
+				if input == abDragInput and (input.UserInputState == Enum.UserInputState.End or input.UserInputState == Enum.UserInputState.Cancel) then
 					changedConn:Disconnect()
 					abDrag = false
+					abDragInput = nil
 					if not abMoved then
 						abToggle()
 					else
@@ -11499,10 +12229,10 @@ do
 		end
 	end)
 	a742jConn = userInputService.InputChanged:Connect(function(input)
-		if not abDrag or not abStart or not abPos0 then return end
-		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+		if not abDrag or not abDragInput or not abStart or not abPos0 then return end
+		if (abDragInput.UserInputType == Enum.UserInputType.Touch and input == abDragInput) or (abDragInput.UserInputType == Enum.UserInputType.MouseButton1 and input.UserInputType == Enum.UserInputType.MouseMovement) then
 			local d = input.Position - abStart
-			if math.abs(d.X) + math.abs(d.Y) > 8 then abMoved = true end
+			if (d.X * d.X + d.Y * d.Y) > 144 then abMoved = true end
 			if abMoved then
 				local cam = workspaceService.CurrentCamera
 				local vp = cam and cam.ViewportSize or Vector2.new(1920, 1080)
@@ -11517,9 +12247,9 @@ do
 	-- AutoBlock UI sync is now purely event-driven via a742jPaint (zero per-frame polling)
 end
 
-	local visSec = visualTab:Section({ Title = "Visual — ESP Kit — Ability Icon + Cooldown", Opened = true })
+	local visSec = visualTab:Section({ Title = "Character ESP", Opened = true })
 CFG_UI["VisAbility"] = visSec:Toggle({
-  Title = "Ability ESP (icon + cooldown above heads)",
+  Title = "Ability ESP",
   Type = "Checkbox",
   Value = false,
   Callback = function(v)
@@ -11529,7 +12259,7 @@ CFG_UI["VisAbility"] = visSec:Toggle({
 })
 rawset(_G, "NERG_ABILITY_ESP", false)
 CFG_UI["VisKillerEsp"] = visSec:Toggle({
-  Title = "Killer esp (highlight)",
+  Title = "Killer ESP",
   Type = "Checkbox",
   Value = false,
   Callback = function(v)
@@ -11538,7 +12268,7 @@ CFG_UI["VisKillerEsp"] = visSec:Toggle({
   end,
 })
 CFG_UI["VisSurvEsp"] = visSec:Toggle({
-  Title = "Survivors esp (highlight)",
+  Title = "Survivor ESP",
   Type = "Checkbox",
   Value = false,
   Callback = function(v)
@@ -11556,7 +12286,7 @@ CFG_UI["VisTagsEsp"] = visSec:Toggle({
   end,
 })
 CFG_UI["TagOptions"] = visSec:Dropdown({
-  Title = "Player Tags",
+  Title = "Tag Elements",
   Values = { "Name", "Role", "Health", "Distance", "Stamina", "Velocity", "Device", "Abilities" },
   Multi = true,
   AllowNone = true,
@@ -11604,13 +12334,6 @@ pcall(function()
     Value = false,
     Callback = function(v) if uiBoot then return end pcall(function() O.setMaster(v) end) end,
   })
-  local objTypeMap = {
-    ["Graffiti"] = "Graffiti",
-    ["Taph Traps"] = "TaphTrap",
-    ["Rituals"] = "Ritual",
-    ["Builderman"] = "Builderman",
-    ["Azure Traps"] = "AzureTrap",
-  }
   CFG_UI["ObjTypes"] = objSec:Dropdown({
     Title = "Object & Trap Types",
     Values = { "Graffiti", "Taph Traps", "Rituals", "Builderman", "Azure Traps" },
@@ -11619,26 +12342,17 @@ pcall(function()
     Value = { "Graffiti", "Taph Traps", "Rituals", "Builderman", "Azure Traps" },
     Callback = function(o)
       if uiBoot then return end
-      local sel = {}
-      if type(o) == "table" then
-        for k, v in pairs(o) do
-          if type(k) == "number" and type(v) == "string" then sel[v] = true
-          elseif v == true and type(k) == "string" then sel[k] = true end
-        end
-      end
-      for label, internalKey in pairs(objTypeMap) do
-        pcall(function() O.setType(internalKey, sel[label] == true) end)
-      end
+      pcall(function() O.setTypes(o) end)
     end,
   })
   CFG_UI["ObjAzureR"] = objSec:Toggle({
-    Title = "  Azure attack radius (circle)",
+    Title = "Azure Attack Radius",
     Type = "Checkbox",
     Value = false,
     Callback = function(v) if uiBoot then return end pcall(function() O.setAzure(v) end) end,
   })
   CFG_UI["ObjItems"] = objSec:Toggle({
-    Title = "Items ESP (Medkit / Bloxy Cola)",
+    Title = "Items ESP",
     Type = "Checkbox",
     Value = false,
     Callback = function(v) if uiBoot then return end pcall(function() O.setItems(v) end) end,
@@ -11686,7 +12400,7 @@ pcall(function()
   local itemMapSec = visualTab:Section({ Title = "Item Map", Icon = "map-pin" })
   local IM = _G.NERG_ITEM_MAP
   CFG_UI["ItemMapMaster"] = itemMapSec:Toggle({
-    Title = "Item Map ESP Master",
+    Title = "Map Items ESP",
     Type = "Checkbox",
     Value = false,
     Callback = function(v) if uiBoot then return end pcall(function() IM.setMaster(v) end) end,
@@ -11714,7 +12428,7 @@ pcall(function()
   local projSec = visualTab:Section({ Title = "Projectiles", Icon = "crosshair" })
   local P = _G.NERG_PROJ
   CFG_UI["ProjMark"] = projSec:Toggle({
-    Title = "Projectile trajectory + hitbox",
+    Title = "Projectile Trajectory",
     Type = "Checkbox",
     Value = false,
     Callback = function(v) if uiBoot then return end pcall(function() P.set(v) end) end,
@@ -11730,7 +12444,7 @@ pcall(function()
   pcall(function()
     local W = _G.NERG_WINDUP
     CFG_UI["Windup"] = projSec:Toggle({
-      Title = "Windup preview (yellow)",
+      Title = "Windup Preview",
       Type = "Checkbox",
       Value = false,
       Callback = function(v) if uiBoot then return end pcall(function() W.set(v) end) end,
@@ -11800,24 +12514,27 @@ pcall(function()
     end
 
     local bar = hudState.bar
-    local dragging, dragStart, startPos = false, nil, nil
+    local dragging, dragInput, dragStart, startPos = false, nil, nil, nil
     hudState.dragConns[#hudState.dragConns + 1] = bar.InputBegan:Connect(function(inp)
+      if dragging then return end
       if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
         dragging = true
+        dragInput = inp
         dragStart = inp.Position
         startPos = bar.Position
         local endConn
         endConn = inp.Changed:Connect(function()
-          if inp.UserInputState == Enum.UserInputState.End then
+          if inp == dragInput and (inp.UserInputState == Enum.UserInputState.End or inp.UserInputState == Enum.UserInputState.Cancel) then
             endConn:Disconnect()
             dragging = false
+            dragInput = nil
             hudState.pos = bar.Position
           end
         end)
       end
     end)
     hudState.dragConns[#hudState.dragConns + 1] = userInputService.InputChanged:Connect(function(inp)
-      if dragging and dragStart and startPos and (inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch) then
+      if dragging and dragInput and dragStart and startPos and ((dragInput.UserInputType == Enum.UserInputType.Touch and inp == dragInput) or (dragInput.UserInputType == Enum.UserInputType.MouseButton1 and inp.UserInputType == Enum.UserInputType.MouseMovement)) then
         local cam = workspaceService.CurrentCamera
         local vp = cam and cam.ViewportSize or Vector2.new(1920, 1080)
         local d = inp.Position - dragStart
@@ -12070,7 +12787,7 @@ pcall(function()
     Callback = function(v) if uiBoot then return end pcall(_G.NERG_GFX.setFullbright, v) end
   })
   CFG_UI["LowTex"] = gfxSec:Toggle({
-    Title = "Low Texture Mode (FPS Booster)",
+    Title = "Low Texture Mode",
     Type = "Checkbox",
     Value = initLt,
     Callback = function(v) if uiBoot then return end pcall(_G.NERG_GFX.setLowTexture, v) end
@@ -12083,7 +12800,7 @@ end)
 
 pcall(function()
 	local _, pObj = infoTab:Paragraph({
-		Title = "NergPlus - Version : 3.3",
+		Title = "NergPlus - Version : 3.5.1",
 		Desc = "Make you look more way like a Pro Player ( if you know how to use it , ofc )",
 		Image = "zap",
 		ImageSize = 24,
@@ -12111,23 +12828,17 @@ pcall(function()
 		s.Transparency = 0.35
 		s.Parent = pObj.ParagraphFrame.UIElements.Main
 	end
-	infoTab:Paragraph({
-		Title = "Changelog",
-		Desc = "Changelog details will be updated soon.",
-		Image = "scroll-text",
-		ImageSize = 24,
-		Color = Color3.fromRGB(150, 255, 180),
-	})
 	infoTab:Select()
 end)
 
 pcall(function()
-	factTab:Paragraph({
-		Title = "Fact",
-		Desc = "Coming Soon cuz im to lazy",
-		Image = "lightbulb",
-		ImageSize = 24,
-		Color = Color3.fromRGB(255, 220, 120),
+	local abFactsSec = factTab:Section({ Title = "AutoBlock Facts", Icon = "shield", Opened = true })
+	abFactsSec:Paragraph({
+		Title = "M1 Detection Modes",
+		Desc = "• Animation Mode on AutoBlock : slower but only block m1\n• Sound Mode : fast but will block behead or some sound have same sound id like m1",
+		Image = "shield-alert",
+		ImageSize = 22,
+		Color = Color3.fromHex("#18151C"),
 	})
 end)
 
@@ -12250,12 +12961,13 @@ function genCore.espApply()
 		end
 	end
 	if refPos and #alive > (genCore.cap or 6) then
+		local dMap = {}
+		for _, g2 in ipairs(alive) do
+			local okD, dVal = pcall(function() return (genResolveCore(g2):GetPivot().Position - refPos).Magnitude end)
+			dMap[g2] = (okD and type(dVal) == "number") and dVal or math.huge
+		end
 		table.sort(alive, function(a2, b2)
-			local okA, dA = pcall(function() return (genResolveCore(a2):GetPivot().Position - refPos).Magnitude end)
-			local okB, dB = pcall(function() return (genResolveCore(b2):GetPivot().Position - refPos).Magnitude end)
-			if not okA then return false end
-			if not okB then return true end
-			return dA < dB
+			return (dMap[a2] or math.huge) < (dMap[b2] or math.huge)
 		end)
 	end
 	local limit = genCore.cap or 6
@@ -12428,9 +13140,8 @@ do
             local ses = v
             task.spawn(function()
               active[ses] = true
-              local ok2, err2 = pcall(onSession, ses)
+              pcall(onSession, ses)
               active[ses] = nil
-              if not ok2 then pcall(function() warn("[NERG-A743] " .. tostring(err2)) end) end
             end)
             break
           end
@@ -12506,10 +13217,6 @@ do
           end
         end
         if #tran == 1 then
-          local prB = b.Pairs[bestI]
-          local r1, c1 = rc(prB[1])
-          local r2, c2 = rc(prB[2])
-          print(string.format("[NERG-A743] flow 0/%d — YOU pull pair-%d: (%d,%d)-(%d,%d)", maxI, bestI, r1, c1, r2, c2))
           return
         end
         local function mutatePath(i2, pts)
@@ -12718,7 +13425,6 @@ do
           dfs(a2)
           return success
         end
-        local t0 = os.clock()
         bt(1)
         if not success and not inp.Ended and mod.flow.on then
           nodes = 0
@@ -12726,7 +13432,6 @@ do
           bt(1)
         end
         if not success then
-          warn("[NERG-A743] flow: fail — solve by hand")
           return
         end
         local bestSnap = b.Paths[bestI]
@@ -12738,10 +13443,6 @@ do
         if type(rd) == "table" and type(rd.Render) == "function" then
           pcall(function() return rd:Render() end)
         end
-        local prB = b.Pairs[bestI]
-        local r1, c1 = rc(prB[1])
-        local r2, c2 = rc(prB[2])
-        print(string.format("[NERG-A743] flow %d/%d (%.2fs) — YOU pull pair-%d: (%d,%d)-(%d,%d)", #prs, maxI, os.clock() - t0, bestI, r1, c1, r2, c2))
       end) end
     end
     do -- LOCK: bấm theo frame (kim cộng tâm Target mới OnPress — 35/35 E2E)
@@ -12806,15 +13507,11 @@ do
             RunA.Heartbeat:Wait()
           end
           if not fired then
-            warn("[NERG-A743] lock: lost ring (12s)")
             break
           end
           logL[#logL + 1] = { sp = tonumber(cfg.Speed), sz = tonumber(cfg.TargetSize), off = offAtFire }
           if #logL > 200 then table.remove(logL, 1) end
           task.wait(0.25)
-        end
-        if inp.Ended or rd.__broken then
-          print("[NERG-A743] lock broken ✓")
         end
       end) end
     end
@@ -12867,9 +13564,6 @@ do
           task.wait(paced())
         end
         task.wait(0.4)
-        if board:IsSolved() or inp.Ended then
-          print("[NERG-A743] connect solved ✓ (game finishes it)")
-        end
       end) end
     end
     do -- GEAR tracker: chỉ đánh dấu activeSessions (ESP hạ 3s) — KHÔNG auto-solve gear
@@ -13113,7 +13807,7 @@ end
 pcall(function()
   local mSec = genAutoTab:Section({ Title = "Minigame Helpers", Icon = "puzzle" })
   CFG_UI["GenFlow"] = mSec:Toggle({
-    Title = "Flow Solver (you finish last pair)",
+    Title = "Flow Solver",
     Type = "Checkbox",
     Value = false,
     Callback = function(v)
@@ -13122,7 +13816,7 @@ pcall(function()
     end,
   })
   CFG_UI["GenLock"] = mSec:Toggle({
-    Title = "Lock Solver (frame-exact)",
+    Title = "Lock Solver",
     Type = "Checkbox",
     Value = false,
     Callback = function(v)
@@ -13131,7 +13825,7 @@ pcall(function()
     end,
   })
   CFG_UI["GenConnect"] = mSec:Toggle({
-    Title = "Connect Solver (auto pairs)",
+    Title = "Connect Solver",
     Type = "Checkbox",
     Value = false,
     Callback = function(v)
@@ -13140,7 +13834,7 @@ pcall(function()
     end,
   })
   CFG_UI["GenGear"] = mSec:Toggle({
-    Title = "Gear ESP (200 studs)",
+    Title = "Gear ESP",
     Type = "Checkbox",
     Value = false,
     Callback = function(v)
@@ -13151,7 +13845,7 @@ pcall(function()
     end,
   })
   CFG_UI["GenPace"] = mSec:Slider({
-    Title = "Solver pace (seconds)",
+    Title = "Solver Pace (s)",
     Step = 0.01,
     Value = { Min = 0.05, Max = 0.6, Default = 0.15 },
     Callback = function(v)
@@ -13180,10 +13874,46 @@ CFG_UI["AutoBlock"] = coreBlockSection:Toggle({
   end,
 })
 
+local abKeybind = tostring(v2.get("guestAutoBlockKeybind", "None") or "None")
+local function readAbKeybindStr()
+  local kb = CFG_UI["ABKey"]
+  local kv = kb and rawget(kb, "Value")
+  if typeof(kv) == "EnumItem" then
+    return kv.Name
+  elseif type(kv) == "string" and kv ~= "" then
+    return kv
+  end
+  return abKeybind
+end
+local function applyAbKeybindStr(v)
+  local ks = (typeof(v) == "EnumItem" and v.Name) or tostring(v or "None")
+  if ks == "" then ks = "None" end
+  abKeybind = ks
+  v2.set("guestAutoBlockKeybind", ks)
+  local kb = CFG_UI["ABKey"]
+  if kb and kb.Set and ks ~= "None" then
+    pcall(function() kb:Set(ks) end)
+  end
+end
+
 CFG_UI["ABKey"] = coreBlockSection:Keybind({
   Title = "Toggle Auto Block Keybind",
+  Value = (abKeybind ~= "None" and abKeybind ~= "") and abKeybind or nil,
   CanChange = true,
-  Callback = function()
+  Callback = function(v)
+    if type(v) == "string" and v ~= "" then
+      abKeybind = v
+      v2.set("guestAutoBlockKeybind", v)
+    elseif typeof(v) == "EnumItem" then
+      abKeybind = v.Name
+      v2.set("guestAutoBlockKeybind", v.Name)
+    else
+      local curK = readAbKeybindStr()
+      if curK ~= abKeybind then
+        abKeybind = curK
+        v2.set("guestAutoBlockKeybind", curK)
+      end
+    end
     if uiBoot then return end
     if _G.__NERG_BLK_LOG and _G.__NERG_BLK_LOG.toggleAB then
       _G.__NERG_BLK_LOG.toggleAB(not autoBlock, true)
@@ -13239,7 +13969,7 @@ CFG_UI["BlockCD"] = coreBlockSection:Slider({
   end,
 })
 
-hbBlockSection = blockTab:Section({ Title = "Hitbox Mode & Dynamic Expanders", Opened = true })
+hbBlockSection = blockTab:Section({ Title = "Hitbox Mode", Opened = true })
 
 CFG_UI["ABHbLen"] = hbBlockSection:Slider({
   Title = "Hitbox Length Scale",
@@ -13308,7 +14038,7 @@ CFG_UI["ABAntiSpinSens"] = hbBlockSection:Slider({
 })
 
 CFG_UI["ABHbPreview"] = hbBlockSection:Toggle({
-  Title = "3D Hitbox Preview (Auto-Hide)",
+  Title = "3D Hitbox Preview",
   Type = "Checkbox",
   Value = a742pPreviewOn,
   Callback = function(v)
@@ -13322,7 +14052,7 @@ if a742pPreviewOn and a742pSetPreview then
   task.defer(a742pSetPreview, true)
 end
 
-coneBlockSection = blockTab:Section({ Title = "Cone Mode & Diagnostics", Opened = true })
+coneBlockSection = blockTab:Section({ Title = "Cone Mode", Opened = true })
 
 CFG_UI["ShowVisCone"] = coneBlockSection:Toggle({
   Title = "Show Vision Cone",
@@ -13348,7 +14078,7 @@ CFG_UI["Facing"] = coneBlockSection:Toggle({
 })
 
 CFG_UI["VisRange"] = coneBlockSection:Slider({
-  Title = "Vision Range (block reach)",
+  Title = "Vision Range",
   Step = 0.5,
   Value = { Min = 1, Max = 20, Default = visionRange },
   Callback = function(value24)
@@ -13370,7 +14100,7 @@ CFG_UI["VisAngle"] = coneBlockSection:Slider({
 })
 
 CFG_UI["Telemetry"] = coneBlockSection:Toggle({
-  Title = "Telemetry (verbose logs)",
+  Title = "Telemetry",
   Type = "Checkbox",
   Value = v2.get("a720Telemetry", false),
   Callback = function(valueTE)
@@ -13392,7 +14122,7 @@ CFG_UI["NoHDTCD"] = hdtKeoSection:Toggle({
 })
 
 pcall(function() CFG_UI["HDTKeo"] = hdtKeoSection:Toggle({
-  Title = "HDT (pull toward killer)",
+  Title = "Body Pull (HDT)",
   Type = "Checkbox",
   Value = hdtKeo,
 Callback = function(v) if uiBoot then return end hdtKeo = v v2.set("guestHDTKeoThan", v) syncSurvivorCombatHooks() end,
@@ -13407,7 +14137,7 @@ Callback = function(v) if uiBoot then return end hdtSpeed = v v2.set("guestHDTSp
 do
   local aimSec = punchTab:Section({ Title = "Aimbot Punch", Opened = true })
   CFG_UI["AimPunch"] = aimSec:Toggle({
-    Title = "Aimbot Punch (steer)",
+    Title = "Aimbot Punch",
     Type = "Checkbox",
     Value = aimPunch,
     Callback = function(v)
@@ -13464,7 +14194,7 @@ end
 do
   local chargeSec = punchTab:Section({ Title = "Auto Charge & Aim", Opened = true })
   CFG_UI["AutoCharge"] = chargeSec:Toggle({
-    Title = "Auto Charge (fallback when Block on CD)",
+    Title = "Auto Charge",
     Type = "Checkbox",
     Value = autoCharge,
     Callback = function(v)
@@ -13475,7 +14205,7 @@ do
     end,
   })
   CFG_UI["ChargeAim"] = chargeSec:Toggle({
-    Title = "Charge Aim (HRP track & auto-detach)",
+    Title = "Charge Aim",
     Type = "Checkbox",
     Value = chargeAim,
     Callback = function(v)
@@ -13501,6 +14231,248 @@ end
 cfgTab = SSystem:Tab({ Title = "Config", Icon = "settings" })
 local uiRepaint
 pcall(function()
+  local miscTab = SSystem:Tab({ Title = "Misc", Icon = "sliders" })
+
+  local PRIVACY_KEYS = { "HideKillerWins", "HidePlaytime", "HideSurvivorWins" }
+  local ahsOn = v2.get("ahsRevealStats", false) and true or false
+  local ahsOrig = {}
+  local ahsConns = {}
+  local ahsPlrConns = {}
+  local ahsThreads = {}
+  local ahsPushing = false
+
+  local function clearPlrHook(plr)
+    local th = ahsThreads[plr]
+    if th then
+      ahsThreads[plr] = nil
+      if coroutine.running() ~= th then
+        pcall(task.cancel, th)
+      end
+    end
+    local pList = ahsPlrConns[plr]
+    if pList then
+      ahsPlrConns[plr] = nil
+      for i = #pList, 1, -1 do
+        local c = pList[i]
+        pList[i] = nil
+        pcall(function() c:Disconnect() end)
+      end
+    end
+  end
+
+  local function hookPlrPrivacy(plr)
+    if not (ahsOn and __PLUS_GEN_ALIVE and not _G.__NERG_KILLED and plr and plr.Parent == players) then return end
+    clearPlrHook(plr)
+    ahsThreads[plr] = task.spawn(function()
+      local pd = plr:FindFirstChild("PlayerData") or plr:WaitForChild("PlayerData", 10)
+      local st = pd and (pd:FindFirstChild("Settings") or pd:WaitForChild("Settings", 10))
+      local pr = st and (st:FindFirstChild("Privacy") or st:WaitForChild("Privacy", 10))
+      ahsThreads[plr] = nil
+      if not (ahsOn and __PLUS_GEN_ALIVE and not _G.__NERG_KILLED and pr and plr.Parent == players) then return end
+      local saved = ahsOrig[plr]
+      if not saved then
+        saved = {}
+        ahsOrig[plr] = saved
+      end
+      local pList = {}
+      ahsPlrConns[plr] = pList
+      for _, key in ipairs(PRIVACY_KEYS) do
+        local valObj = pr:FindFirstChild(key) or pr:WaitForChild(key, 5)
+        if not (ahsOn and __PLUS_GEN_ALIVE and not _G.__NERG_KILLED and plr.Parent == players) then return end
+        if valObj and valObj:IsA("ValueBase") then
+          if saved[key] == nil then
+            saved[key] = valObj.Value
+          end
+          if valObj.Value ~= false then
+            ahsPushing = true
+            pcall(function() valObj.Value = false end)
+            ahsPushing = false
+          end
+          pList[#pList + 1] = valObj:GetPropertyChangedSignal("Value"):Connect(function()
+            if ahsPushing or not (ahsOn and __PLUS_GEN_ALIVE and not _G.__NERG_KILLED) then return end
+            if valObj.Value ~= false then
+              saved[key] = valObj.Value
+              ahsPushing = true
+              pcall(function() valObj.Value = false end)
+              ahsPushing = false
+            end
+          end)
+        end
+      end
+    end)
+  end
+
+  local function stopAhs()
+    for i = #ahsConns, 1, -1 do
+      local c = ahsConns[i]
+      ahsConns[i] = nil
+      pcall(function() c:Disconnect() end)
+    end
+    for plr in pairs(ahsThreads) do
+      clearPlrHook(plr)
+    end
+    for plr in pairs(ahsPlrConns) do
+      clearPlrHook(plr)
+    end
+    ahsPushing = true
+    for plr, saved in pairs(ahsOrig) do
+      if plr and plr.Parent == players then
+        local pd = plr:FindFirstChild("PlayerData")
+        local st = pd and pd:FindFirstChild("Settings")
+        local pr = st and st:FindFirstChild("Privacy")
+        if pr then
+          for key, origVal in pairs(saved) do
+            local valObj = pr:FindFirstChild(key)
+            if valObj and valObj:IsA("ValueBase") then
+              pcall(function() valObj.Value = origVal end)
+            end
+          end
+        end
+      end
+      ahsOrig[plr] = nil
+    end
+    ahsPushing = false
+  end
+
+  local function setAhs(v)
+    ahsOn = v and true or false
+    v2.set("ahsRevealStats", ahsOn)
+    stopAhs()
+    if ahsOn and __PLUS_GEN_ALIVE and not _G.__NERG_KILLED then
+      for _, plr in ipairs(players:GetPlayers()) do
+        hookPlrPrivacy(plr)
+      end
+      ahsConns[#ahsConns + 1] = players.PlayerAdded:Connect(function(plr)
+        if ahsOn and __PLUS_GEN_ALIVE and not _G.__NERG_KILLED then
+          hookPlrPrivacy(plr)
+        end
+      end)
+      ahsConns[#ahsConns + 1] = players.PlayerRemoving:Connect(function(plr)
+        clearPlrHook(plr)
+        ahsOrig[plr] = nil
+      end)
+    end
+  end
+
+  rawset(_G, "NERG_AHS", {
+    get = function() return ahsOn end,
+    set = setAhs,
+    shutdown = function()
+      ahsOn = false
+      stopAhs()
+    end,
+  })
+
+  local VALID_DEVICES = { PC = true, Mobile = true, Console = true }
+  local spoofOn = v2.get("spoofDeviceOn", false) and true or false
+  local rawSpoofType = tostring(v2.get("spoofDeviceType", "PC") or "PC")
+  local spoofType = VALID_DEVICES[rawSpoofType] and rawSpoofType or "PC"
+  local origDevice = (userInputService.TouchEnabled and not userInputService.KeyboardEnabled and "Mobile")
+    or (userInputService.GamepadEnabled and not userInputService.KeyboardEnabled and "Console")
+    or "PC"
+  local spoofExitConn = nil
+  local spoofWasApplied = false
+
+  local function sendDevice(dev)
+    if not (remoteEvent and type(dev) == "string" and VALID_DEVICES[dev]) then return end
+    pcall(function()
+      remoteEvent:FireServer("SetDevice", { dev })
+    end)
+  end
+
+  local function disconnectSpoofExit()
+    if spoofExitConn then
+      local c = spoofExitConn
+      spoofExitConn = nil
+      pcall(function() c:Disconnect() end)
+    end
+  end
+
+  local function syncDeviceSpoof()
+    if spoofOn and __PLUS_GEN_ALIVE and not _G.__NERG_KILLED then
+      spoofWasApplied = true
+      sendDevice(spoofType)
+      if not spoofExitConn and localPlayer then
+        spoofExitConn = localPlayer.AncestryChanged:Connect(function(_, parent)
+          if not parent then
+            disconnectSpoofExit()
+            sendDevice(origDevice)
+          end
+        end)
+      end
+    else
+      disconnectSpoofExit()
+      if spoofWasApplied then
+        spoofWasApplied = false
+        sendDevice(origDevice)
+      end
+    end
+  end
+
+  local function setSpoofOn(v)
+    spoofOn = v and true or false
+    v2.set("spoofDeviceOn", spoofOn)
+    syncDeviceSpoof()
+  end
+
+  local function setSpoofType(v)
+    local s = tostring(v or "PC")
+    if VALID_DEVICES[s] then
+      spoofType = s
+      v2.set("spoofDeviceType", spoofType)
+      if spoofOn and __PLUS_GEN_ALIVE and not _G.__NERG_KILLED then
+        spoofWasApplied = true
+        sendDevice(spoofType)
+      end
+    end
+  end
+
+  rawset(_G, "NERG_DEV_SPOOF", {
+    getOn = function() return spoofOn end,
+    getType = function() return spoofType end,
+    setOn = setSpoofOn,
+    setType = setSpoofType,
+    shutdown = function()
+      spoofOn = false
+      syncDeviceSpoof()
+    end,
+  })
+
+  local privSec = miscTab:Section({ Title = "Privacy & Stats", Icon = "eye", Opened = true })
+  CFG_UI["AntiHiddenStats"] = privSec:Toggle({
+    Title = "Reveal Hidden Stats",
+    Type = "Checkbox",
+    Value = ahsOn,
+    Callback = function(v)
+      if uiBoot then return end
+      pcall(_G.NERG_AHS.set, v)
+    end,
+  })
+
+  local devSec = miscTab:Section({ Title = "Device Spoofer", Icon = "monitor", Opened = true })
+  CFG_UI["SpoofDeviceOn"] = devSec:Toggle({
+    Title = "Spoof Device",
+    Type = "Checkbox",
+    Value = spoofOn,
+    Callback = function(v)
+      if uiBoot then return end
+      pcall(_G.NERG_DEV_SPOOF.setOn, v)
+    end,
+  })
+  CFG_UI["SpoofDeviceType"] = devSec:Dropdown({
+    Title = "Spoofed Device",
+    Values = { "PC", "Mobile", "Console" },
+    Value = spoofType,
+    Callback = function(v)
+      if uiBoot then return end
+      pcall(_G.NERG_DEV_SPOOF.setType, v)
+    end,
+  })
+
+  if ahsOn then task.defer(setAhs, true) end
+  if spoofOn then task.defer(syncDeviceSpoof) end
+end)
+pcall(function()
   local HttpService = game:GetService("HttpService")
   local function cfgNotify(msg)
     pcall(function()
@@ -13509,6 +14481,7 @@ pcall(function()
   end
   local CFG_REG = {
     { "Auto Block", "guestAutoBlockAudioOn", function() return autoBlock end, function(v) autoBlock = v if a742jPaint then pcall(a742jPaint) end if _G.__NERG_SYNC_AB_EARS then pcall(_G.__NERG_SYNC_AB_EARS, autoBlock) end if setVisLoop then setVisLoop(visWanted()) end end, true, "AutoBlock" },
+    { "Auto Block Keybind", "guestAutoBlockKeybind", readAbKeybindStr, applyAbKeybindStr, "None", "ABKey" },
     { "M1 Detection", "blockM1Detect", function() return a742oAnimM1 and "Animation" or "Sound" end, function(v) a742oAnimM1 = (v == "Animation") end, "Sound", "ABM1Detect" },
     { "Block Detection", "blockDetectMode", function() return a742pHitboxMode and "Hitbox" or "Cone" end, function(v) local isHb = (v == "Hitbox") a742pHitboxMode = isHb if not isHb and a742pClearBoxes then pcall(a742pClearBoxes) end if setVisLoop then setVisLoop(visWanted()) end end, "Cone", "ABBlockMode" },
     { "Hitbox Length Scale", "a742pLenScale", function() return a742pLenScale end, function(v) a742pLenScale = v end, 1, "ABHbLen" },
@@ -13536,10 +14509,10 @@ pcall(function()
     { "Charge Aim", "chargeAimOn", function() return chargeAim end, function(v) chargeAim = (v == true) syncSurvivorCombatHooks() end, false, "ChargeAim" },
     { "Charge Max Range", "chargeMaxRangeVal", function() return chargeMaxRange end, function(v) local n = tonumber(v) if n then chargeMaxRange = math.clamp(n, 10, 35) end end, 20, "ChargeMaxRange" },
     { "Ability ESP", "a720VisAbility", function() return _G.NERG_ABILITY_ESP == true end, function(v) rawset(_G, "NERG_ABILITY_ESP", v and true or false) pcall(function() if ESP_SET and ESP_SET.ability then ESP_SET.ability(v) end end) end, false, "VisAbility" },
-    { "Killer esp (highlight)", "a720VisKiller", function() return ESP_SET.get("KillerEsp") end, function(v) pcall(function() ESP_SET.killer(v) end) end, false, "VisKillerEsp" },
-    { "Survivors esp (highlight)", "a720VisSurv", function() return ESP_SET.get("SurvEsp") end, function(v) pcall(function() ESP_SET.surv(v) end) end, false, "VisSurvEsp" },
-    { "Player Tags (overhead text)", "a720VisTags", function() return ESP_SET.get("TagsEsp") end, function(v) pcall(function() ESP_SET.tags(v) end) end, false, "VisTagsEsp" },
-    { "Player Tags", "espPlayerTags", function()
+    { "Killer ESP", "a720VisKiller", function() return ESP_SET.get("KillerEsp") end, function(v) pcall(function() ESP_SET.killer(v) end) end, false, "VisKillerEsp" },
+    { "Survivor ESP", "a720VisSurv", function() return ESP_SET.get("SurvEsp") end, function(v) pcall(function() ESP_SET.surv(v) end) end, false, "VisSurvEsp" },
+    { "Player Tags", "a720VisTags", function() return ESP_SET.get("TagsEsp") end, function(v) pcall(function() ESP_SET.tags(v) end) end, false, "VisTagsEsp" },
+    { "Tag Elements", "espPlayerTags", function()
       local t = {}
       local cur = (ESP_SET and ESP_SET.getOptions and ESP_SET.getOptions()) or (ESP_SET and ESP_SET.get and ESP_SET.get("Options")) or {}
       for _, k in ipairs({ "Name", "Role", "Health", "Distance", "Stamina", "Velocity", "Device", "Abilities" }) do
@@ -13552,13 +14525,19 @@ pcall(function()
     { "Killer color", "a720KillerColor", function() local c = ESP_SET.get("KillerColor") return c and (math.floor(c.R * 255 + 0.5) .. "," .. math.floor(c.G * 255 + 0.5) .. "," .. math.floor(c.B * 255 + 0.5)) or "235,95,95" end, function(v) local r, g2, b = tostring(v):match("^(%d+),(%d+),(%d+)$") if r then pcall(function() ESP_SET.color_killer(Color3.fromRGB(tonumber(r), tonumber(g2), tonumber(b))) end) end end, "235,95,95", "VisKillerColor" },
     { "Survivor color", "a720SurvColor", function() local c = ESP_SET.get("SurvColor") return c and (math.floor(c.R * 255 + 0.5) .. "," .. math.floor(c.G * 255 + 0.5) .. "," .. math.floor(c.B * 255 + 0.5)) or "105,225,135" end, function(v) local r, g2, b = tostring(v):match("^(%d+),(%d+),(%d+)$") if r then pcall(function() ESP_SET.color_surv(Color3.fromRGB(tonumber(r), tonumber(g2), tonumber(b))) end) end end, "105,225,135", "VisSurvColor" },
     { "Telemetry", "a720Telemetry", function() return v2.get("a720Telemetry", false) end, function(v) v2.set("a720Telemetry", v) end, false, "Telemetry" },
-    { "Stamina Control", "a730sCtl", function() return stamCore.run end, function(v) if v then stamCore.start() else stamCore.stop() end end, false, "StamCtl" },
-    { "Infinite Stamina", "a730sInf", function() return stamCore.val.inf end, function(v) stamCore.val.inf = v and true or false pcall(function() stamCore.poke() end) end, false, "StamInf" },
-    { "Stamina Max", "a730sMax", function() return tostring(stamCore.val.max) end, function(v) local n = tonumber(v) if n then stamCore.val.max = n stamCore.poke() end end, "100", "StamMax" },
-    { "Stamina Min", "a730sMin", function() return tostring(stamCore.val.min) end, function(v) local n = tonumber(v) if n then stamCore.val.min = n stamCore.poke() end end, "0", "StamMin" },
-    { "Stamina Loss", "a730sLoss", function() return tostring(stamCore.val.loss) end, function(v) local n = tonumber(v) if n then stamCore.val.loss = n stamCore.poke() end end, "10", "StamLoss" },
-    { "Stamina Gain", "a730sGain", function() return tostring(stamCore.val.gain) end, function(v) local n = tonumber(v) if n then stamCore.val.gain = n stamCore.poke() end end, "20", "StamGain" },
-    { "Sprint Speed", "a730sSprint", function() return tostring(stamCore.val.sprint) end, function(v) local n = tonumber(v) if n then stamCore.val.sprint = n stamCore.poke() end end, "26", "StamSprint" },
+    { "Survivor Stamina Control", "a730sCtl", function() return stamCore.surv.on end, function(v) stamCore.surv.on = (v == true) stamCore.syncLoop() end, false, "StamCtl" },
+    { "Infinite Stamina", "a730sInf", function() return stamCore.val.inf end, function(v) stamCore.val.inf = (v == true) stamCore.syncLoop() end, false, "StamInf" },
+    { "Survivor Max Stamina", "a730sMax", function() return tostring(stamCore.surv.max) end, function(v) local n = tonumber(v) if n then stamCore.surv.max = n stamCore.poke() end end, "100", "StamMax" },
+    { "Survivor Min Stamina", "a730sMin", function() return tostring(stamCore.surv.min) end, function(v) local n = tonumber(v) if n then stamCore.surv.min = n stamCore.poke() end end, "0", "StamMin" },
+    { "Survivor Stamina Loss", "a730sLoss", function() return tostring(stamCore.surv.loss) end, function(v) local n = tonumber(v) if n then stamCore.surv.loss = n stamCore.poke() end end, "10", "StamLoss" },
+    { "Survivor Stamina Gain", "a730sGain", function() return tostring(stamCore.surv.gain) end, function(v) local n = tonumber(v) if n then stamCore.surv.gain = n stamCore.poke() end end, "20", "StamGain" },
+    { "Survivor Sprint Speed", "a730sSprint", function() return tostring(stamCore.surv.sprint) end, function(v) local n = tonumber(v) if n then stamCore.surv.sprint = n stamCore.poke() end end, "26", "StamSprint" },
+    { "Killer Stamina Control", "a730kCtl", function() return stamCore.killer.on end, function(v) stamCore.killer.on = (v == true) stamCore.syncLoop() end, false, "StamKCtl" },
+    { "Killer Max Stamina", "a730kMax", function() return tostring(stamCore.killer.max) end, function(v) local n = tonumber(v) if n then stamCore.killer.max = n stamCore.poke() end end, "110", "StamKMax" },
+    { "Killer Min Stamina", "a730kMin", function() return tostring(stamCore.killer.min) end, function(v) local n = tonumber(v) if n then stamCore.killer.min = n stamCore.poke() end end, "0", "StamKMin" },
+    { "Killer Stamina Loss", "a730kLoss", function() return tostring(stamCore.killer.loss) end, function(v) local n = tonumber(v) if n then stamCore.killer.loss = n stamCore.poke() end end, "9.5", "StamKLoss" },
+    { "Killer Stamina Gain", "a730kGain", function() return tostring(stamCore.killer.gain) end, function(v) local n = tonumber(v) if n then stamCore.killer.gain = n stamCore.poke() end end, "21", "StamKGain" },
+    { "Killer Sprint Speed", "a730kSprint", function() return tostring(stamCore.killer.sprint) end, function(v) local n = tonumber(v) if n then stamCore.killer.sprint = n stamCore.poke() end end, "28", "StamKSprint" },
     { "Legit Stamina View", "a735sView", function() return stamCore.view.conn ~= nil end, function(v) if v then stamCore.viewStart() else stamCore.viewStop() end end, false, "StamView" },
     { "Sprint Management", "a735sMgOn", function() return stamCore.mgmt.on end, function(v) stamCore.mgmt.on = v and true or false if v then stamCore.mgmtStart() else stamCore.mgmtStop() end end, false, "StamMgOn" },
     { "Sprint Threshold %", "a735sMgPct", function() return tostring(stamCore.mgmt.pct) end, function(v) local n2 = tonumber(v) if n2 then stamCore.mgmt.pct = n2 end end, "10", "StamMgPct" },
@@ -13582,22 +14561,7 @@ pcall(function()
       end
       return t
     end, function(v)
-      local O = _G.NERG_OBJ
-      if not O then return end
-      local sel = {}
-      if type(v) == "table" then
-        for k2, v2 in pairs(v) do
-          if type(k2) == "number" and type(v2) == "string" then sel[v2] = true
-          elseif v2 == true and type(k2) == "string" then sel[k2] = true end
-        end
-      end
-      pcall(function()
-        O.setType("Graffiti", sel["Graffiti"] == true)
-        O.setType("TaphTrap", sel["Taph Traps"] == true)
-        O.setType("Ritual", sel["Rituals"] == true)
-        O.setType("Builderman", sel["Builderman"] == true)
-        O.setType("AzureTrap", sel["Azure Traps"] == true)
-      end)
+      pcall(function() if _G.NERG_OBJ and _G.NERG_OBJ.setTypes then _G.NERG_OBJ.setTypes(v) end end)
     end, { "Graffiti", "Taph Traps", "Rituals", "Builderman", "Azure Traps" }, "ObjTypes" },
     { "Obj Azure Radius", "a746ObjAzureR", function() return _G.NERG_OBJ and _G.NERG_OBJ.azureRadius or false end, function(v) pcall(function() _G.NERG_OBJ.setAzure(v) end) end, false, "ObjAzureR" },
     { "Items ESP", "a746ObjItems", function() return _G.NERG_OBJ and _G.NERG_OBJ.itemsOn or false end, function(v) pcall(function() _G.NERG_OBJ.setItems(v) end) end, false, "ObjItems" },
@@ -13636,6 +14600,9 @@ pcall(function()
     { "Jane Doe: Instant Crystal Charge", "jdInstantCrystal", function() return _G.NERG_COMBAT_EXT and _G.NERG_COMBAT_EXT.get("jdInstantCrystal") or false end, function(v) pcall(function() _G.NERG_COMBAT_EXT.setJDInstantCrystal(v) end) end, false, "JDInstantCrystal" },
     { "Jane Doe: Crystal Aim", "jdCrystalAim", function() return _G.NERG_COMBAT_EXT and _G.NERG_COMBAT_EXT.get("jdCrystalAim") or false end, function(v) pcall(function() _G.NERG_COMBAT_EXT.setJDCrystalAim(v) end) end, false, "JDCrystalAim" },
     { "Jane Doe: Hatchet Aim", "jdHatchetAim", function() return _G.NERG_COMBAT_EXT and _G.NERG_COMBAT_EXT.get("jdHatchetAim") or false end, function(v) pcall(function() _G.NERG_COMBAT_EXT.setJDHatchetAim(v) end) end, false, "JDHatchetAim" },
+    { "Reveal Hidden Stats", "ahsRevealStats", function() return _G.NERG_AHS and _G.NERG_AHS.get() or false end, function(v) pcall(function() _G.NERG_AHS.set(v) end) end, false, "AntiHiddenStats" },
+    { "Spoof Device", "spoofDeviceOn", function() return _G.NERG_DEV_SPOOF and _G.NERG_DEV_SPOOF.getOn() or false end, function(v) pcall(function() _G.NERG_DEV_SPOOF.setOn(v) end) end, false, "SpoofDeviceOn" },
+    { "Spoofed Device", "spoofDeviceType", function() return _G.NERG_DEV_SPOOF and _G.NERG_DEV_SPOOF.getType() or "PC" end, function(v) pcall(function() _G.NERG_DEV_SPOOF.setType(v) end) end, "PC", "SpoofDeviceType" },
   }
   uiRepaint = function()
     uiBoot = true
@@ -13644,7 +14611,9 @@ pcall(function()
       if obj then
         pcall(function()
           local val = e[3]()
-          if type(val) == "table" and obj.Select then
+          if e[6] == "ABKey" and (val == "None" or val == "") then
+            -- leave keybind unbound when None
+          elseif type(val) == "table" and obj.Select then
             obj:Select(val)
           elseif obj.Set then
             obj:Set(val)
@@ -13658,6 +14627,53 @@ pcall(function()
       uiBoot = false
     end)
   end
+  pcall(function()
+    if type(v2._data) == "table" and next(v2._data) ~= nil then
+      if v2._data["a742pHitboxMode"] ~= nil and v2._data["blockDetectMode"] == nil then
+        v2._data["blockDetectMode"] = v2._data["a742pHitboxMode"] and "Hitbox" or "Cone"
+      end
+      if v2._data["a742oAnimM1"] ~= nil and v2._data["blockM1Detect"] == nil then
+        v2._data["blockM1Detect"] = v2._data["a742oAnimM1"] and "Animation" or "Sound"
+      end
+      for _, e in ipairs(CFG_REG) do
+        local savedVal = v2._data[e[2]]
+        if savedVal ~= nil then
+          pcall(e[4], savedVal)
+        end
+      end
+      pcall(uiRepaint)
+    end
+  end)
+  task.spawn(function()
+    while __PLUS_GEN_ALIVE and not _G.__NERG_KILLED do
+      task.wait(1.0)
+      if not (__PLUS_GEN_ALIVE and not _G.__NERG_KILLED) then break end
+      if not uiBoot then
+        local dirty = false
+        for _, e in ipairs(CFG_REG) do
+          local okV, curVal = pcall(e[3])
+          if okV and curVal ~= nil then
+            local k = e[2]
+            local oldVal = v2._data[k]
+            if type(curVal) == "table" then
+              local ok1, j1 = pcall(function() return httpService:JSONEncode(curVal) end)
+              local ok2, j2 = pcall(function() return type(oldVal) == "table" and httpService:JSONEncode(oldVal) or "" end)
+              if ok1 and (not ok2 or j1 ~= j2) then
+                v2._data[k] = curVal
+                dirty = true
+              end
+            elseif oldVal ~= curVal then
+              v2._data[k] = curVal
+              dirty = true
+            end
+          end
+        end
+        if dirty then
+          v2.save()
+        end
+      end
+    end
+  end)
   pcall(function() cfgTab:Paragraph({ Title = "Config — Share Code (VP1)",
     Desc = "Generate code to clipboard or paste code to load." }) end)
   pcall(function() cfgTab:Button({ Title = "Generate config (copy code)", Justify = "Center", Callback = function()
@@ -13691,66 +14707,108 @@ pcall(function()
   end }) end)
   pcall(function() cfgTab:Button({ Title = "Preset: Pretty Legit", Justify = "Center", Callback = function()
     local preset = {
-      guestAutoBlockAudioOn = true,
+      guestAutoBlockAudioOn = false,
       blockM1Detect = "Sound",
-      blockDetectMode = "Cone",
-      a742pLenScale = 1.65,
-      a742pWidScale = 1.3,
+      blockDetectMode = "Hitbox",
+      a742pLenScale = 1.7,
+      a742pWidScale = 1.55,
+      a742pZExpOn = true,
+      a742pZExpSens = 0.7,
+      a742pAntiSpinOn = true,
+      a742pAntiSpinSens = 1.85,
+      a742pPreviewOn = false,
       guestVerifyFacingCheckOn = true,
-      guestVisionRange = 10.5,
-      guestVisionAngle = 57,
+      guestVisionRange = 13.5,
+      guestVisionAngle = 85,
       guestShowVisionRange = true,
       guestBlockDelay = 0,
       guestBlockCooldown = 0.35,
+      a720Telemetry = false,
       guestAutoPunchOn = true,
-      guestAutoPunchDelay = 0.3,
+      guestAutoPunchDelay = 0.15,
       guestAimPunchActive = true,
       guestAimPunchDuration = 0.5,
       guestPunchPrediction = 2.3,
       guestHDTKeoThan = true,
       guestHDTSpeed = 12,
       noHDTCooldown = false,
-      guestAutoChargeOn = false,
+      guestAutoChargeOn = true,
       chargeAimOn = true,
       chargeMaxRangeVal = 20,
-      a720VisAbility = true,
-      a720VisKiller = true,
-      a720VisSurv = true,
-      a720VisTags = true,
-      espPlayerTags = { "Stamina", "Abilities" },
-      a720TextSize = 18,
+      a720VisAbility = false,
+      a720VisKiller = false,
+      a720VisSurv = false,
+      a720VisTags = false,
+      espPlayerTags = { "Name", "Role", "Health", "Distance", "Stamina", "Velocity", "Abilities" },
+      a720TextSize = 14,
       espOpacityPct = 100,
       a720KillerColor = "235,95,95",
       a720SurvColor = "105,225,135",
-      a720Telemetry = false,
-      a730sCtl = true,
-      a730sInf = true,
+      a730sCtl = false,
+      a730sInf = false,
       a730sMax = "100",
       a730sMin = "0",
       a730sLoss = "10",
       a730sGain = "20",
       a730sSprint = "26",
-      a735sView = true,
+      a730kCtl = false,
+      a730kMax = "110",
+      a730kMin = "0",
+      a730kLoss = "9.5",
+      a730kGain = "21",
+      a730kSprint = "28",
+      a735sView = false,
       a735sMgOn = false,
       a735sMgPct = "10",
-      a740gEsp = true,
-      a743mFlow = true,
-      a743mLock = true,
-      a743mConn = true,
-      a743mGear = true,
-      a743mPace = "0.6",
-      a743mJit = "0.5",
-      a746ObjMaster = true,
+      a740gEsp = false,
+      a743mFlow = false,
+      a743mLock = false,
+      a743mConn = false,
+      a743mGear = false,
+      a743mPace = "0.15",
+      a743mJit = "0.2",
+      a746ObjMaster = false,
       espObjectTypes = { "Graffiti", "Taph Traps", "Rituals", "Builderman", "Azure Traps" },
-      a746ObjAzureR = true,
-      a746ObjItems = true,
-      a746ObjTags = true,
-      a746ProjMark = true,
-      a746Windup = true,
-      a747ABOn = false,
+      a746ObjAzureR = false,
+      a746ObjItems = false,
+      a746ObjTags = false,
+      a746ProjMark = false,
+      a746Windup = false,
+      a747ABOn = true,
       a747ABRing = false,
       a747ABRange = 27,
-      a747ABDur = 0.8,
+      a747ABDur = 0.3,
+      a750DodgeOn = false,
+      a750DodgeMelee = 18,
+      a750DodgeChance = 75,
+      a750DodgeFacing = false,
+      a750DodgeNotif = false,
+      a750DodgeCd = 1,
+      a751NoliRushCtrl = true,
+      a751NoliTurnStr = 5.5,
+      a751NoliRushAim = false,
+      a751NoliSpdOn = false,
+      a751NoliDashSpd = 60,
+      a751NoliAntiCrash = false,
+      a751NoliAutoNova = false,
+      a751NoliNovaRad = 14,
+      itemMapMaster = false,
+      itemMapGraffiti = false,
+      itemMapFruits = false,
+      itemMapDist = false,
+      camFovOn = false,
+      camFovVal = 80,
+      camZoomVal = 62,
+      gfxStatusHud = true,
+      gfxFullbright = true,
+      gfxLowTex = false,
+      killerM1Aim = true,
+      jdInstantCrystal = false,
+      jdCrystalAim = false,
+      jdHatchetAim = false,
+      ahsRevealStats = false,
+      spoofDeviceOn = false,
+      spoofDeviceType = "PC",
     }
     local nn = 0
     for _, e in ipairs(CFG_REG) do
@@ -13864,6 +14922,8 @@ function nergUnloadAll(lydo)
   pcall(function() if _G.NERG_WINDUP and _G.NERG_WINDUP.shutdown then _G.NERG_WINDUP.shutdown() n += 1 end end)
   pcall(function() if _G.NERG_HUD and _G.NERG_HUD.shutdown then _G.NERG_HUD.shutdown() n += 1 end end)
   pcall(function() if _G.NERG_GFX and _G.NERG_GFX.shutdown then _G.NERG_GFX.shutdown() n += 1 end end)
+  pcall(function() if _G.NERG_AHS and _G.NERG_AHS.shutdown then _G.NERG_AHS.shutdown() n += 1 end end)
+  pcall(function() if _G.NERG_DEV_SPOOF and _G.NERG_DEV_SPOOF.shutdown then _G.NERG_DEV_SPOOF.shutdown() n += 1 end end)
   pcall(function() if type(StopESPSystem) == "function" then StopESPSystem() n += 1 end end)
   pcall(function()
     if stamCore then
@@ -13957,30 +15017,8 @@ function nergUnloadAll(lydo)
       end
     end
   end)
-  local uirRoots = { (gethui and gethui()), game:GetService("CoreGui"), localPlayer and localPlayer:FindFirstChild("PlayerGui") }
-  local nergGuis = {
-    ["NergFK_TextTags"] = true, ["NergMobileAB"] = true, ["NergABToggle"] = true,
-    ["CinematicText"] = true, ["ForsakenDeviceESP"] = true, ["ForsakenAbilityESP"] = true,
-    ["NergAbsGui"] = true, ["NergDodgeGui"] = true, ["NergStaminaView"] = true, ["NergStatusHUD"] = true,
-    ["NergHBPreview"] = true,
-  }
-  for _, r in ipairs(uirRoots) do
-    if r then
-      for _, g in ipairs(r:GetChildren()) do
-        pcall(function()
-          if (g:IsA("ScreenGui") or g:IsA("Folder")) and (g.Name:find("WindUI") or nergGuis[g.Name]) then
-            g:Destroy()
-          end
-        end)
-      end
-    end
-  end
-  pcall(function()
-    local oldV = workspaceService:FindFirstChild("PlusVis_DLCHUB")
-    if oldV then oldV:Destroy() end
-    local oldB = workspaceService:FindFirstChild("NergABBoxes")
-    if oldB then oldB:Destroy() end
-  end)
+  pcall(function() if _G.__NERG_DOM_PURGE then _G.__NERG_DOM_PURGE() end end)
+  rawset(_G, "__NERG_DOM_PURGE", nil)
 
   rawset(_G, "__A723_TOKEN", {})
   rawset(_G, "__NERG_BOOT_N", nil)
