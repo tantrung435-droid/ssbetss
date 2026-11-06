@@ -1,0 +1,950 @@
+-- backstab TT v1.4.1-tt (A539 DỰ-ĐOÁN-YAW — fix killer-xoay-nhanh-hụt-backstab · kế thừa v1.4.0-tt A215 DS-v2 endpoint-claim) — claim thẳng sau lưng killer từ packet đầu + giữ qua contact (A203/A209) · kế thừa v1.3.1-tt telemetry (A204) + v1.3-tt bug-hunt (A175) + floor 0.55s (A164)
+-- Khác biệt so với v4.6.2: (1) KHÔNG direct mode — dashstab chạy CHOREO thuần (đường chéo
+-- legit, không kéo/teleport nhân vật); (2) UI WINDUI (RightControl mở/đóng, 3 tab, tự lưu
+-- cấu hình qua Folder "backstabTT" — A160 đính chính spec "mini kiểu Plus" thành WindUI); (3) MỚI:
+-- AUTO-AIM cho đâm thường — XOAY nhân vật hướng killer trong cửa sổ stab (chỉ rotation,
+-- giữ vị trí — hitbox Dagger 5 studs theo hướng nhìn; claim sau lưng + hướng nhìn khớp).
+-- Wiki Two_Time: Dagger cd 30s · windup 0.25s · reach 5 studs · front 10 dmg +20% Oblation ·
+-- BACKSTAB 20 dmg + STUN 2s +40% Oblation · crouch-lunge 22 studs + stun 3.5s.
+-- Bug v4.6.1: capture telemetry của DASHSTAB nằm TRONG pcall-closure, print chạy trong
+-- task.delay BÊN NGOÀI → tClaims ngoài scope → global nil → "arithmetic (sub) on number
+-- and nil" 1.2s sau mỗi dashstab. M1 không lỗi (capture function-scope từ đầu). Fix: đưa
+-- capture (tClaims/tKm/tH0/tEngage/seqDuration) ra TRƯỚC pcall — print thấy upvalue.
+-- Owner field v4.6.0: (1) direct "dịch chuyển thẳng" thay vì KÉO → giờ glide nội suy (lerp
+-- từ vị trí đứng → sau lưng killer, homing live, đến nơi đúng hết cửa sổ — hết teleport tức
+-- thời); (2) hiệu quả dashstab "vẫn y như choreo" → claim-path ĐÃ DIFF với bản gốc v4.1.2:
+-- GIỐNG HỆT về công thức — không thể chẩn static nữa → thêm TELEMETRY-LITE in 1 dòng/sequence
+-- (claims đếm + tên killer-cache + health-delta 1.2s sau) — claims=0 nghĩa hook/cache chết;
+-- claims>0 mà dmg=0 nghĩa server-check đổi; (3) UI biến mất khi nhấn → notify() giờ pcall
+-- (SetCore throw không giết button-handler) + watchdog bắt cả ScreenGui-rỗng-con.
+-- Trước: chỉ packet CLAIM ở sau lưng killer — nhân vật thật đứng nguyên → sau sequence có
+-- "snap-back" (server thấy bật lại vị trí cũ = bằng chứng teleport). Giờ: character:PivotTo
+-- sau lưng killer MỖI FRAME (live homing — killer chạy thì bị kéo theo) → vị trí thật và
+-- claim KHỚP VĨNH VIỄN sau cú đâm: hết snap-back + đứng sẵn sau lưng để follow-up.
+-- M1 giữ claim-only (tần suất cao — teleport thật mỗi M1 quá lộ). CHOREO giữ nguyên.
+-- Owner: bản ĐẦU TIÊN (v4.1.2, pre-choreo) KHÔNG cần moredirect vẫn hoạt động CỰC TỐT — chỉ
+-- tệ hiệu năng. Cơ chế gốc: claim TỨC THÌ sau lưng killer MỖI packet (không choreo/ETA/đường
+-- chéo), cửa sổ 0.2s. Choreo A120-123 (v4.3.3+) claim vị trí DỌC ĐƯỜNG — nửa đầu đường killer
+-- thấy mình ở HÔNG/TRƯỚC MẶT → server kiểm tra backstab giữa đường → FAIL ("lao tới trước
+-- mặt killer"). v4.5.1: DIRECT mặc định (đúng cơ chế gốc) · CHOREO giữ làm tùy chọn ·
+-- force-refresh killer cache trong sequence (bỏ debounce đúng lúc cần claim).
+-- Cơ chế spoof đường chéo (choreo M1 + dashstab Bézier homing) GIỮ NGUYÊN 100%. Bỏ: packet
+-- y-90000 (pulse snap) + bookend trả-về — packet duy nhất VẬT LÝ BẤT KHẢ của script, bằng
+-- chứng vĩnh viễn phía server (doc §2), testers đo KHÔNG thấy lợi ích. Hook giờ chỉ đổi packet
+-- KHI sequence đang chạy (doitmate) — ngoài đó thuần passthrough.
+-- 4 fix (chi tiết: AUTO_BACKSTAB_V4_STABILITY_SAFETY.md §8 — triệu chứng owner: UI biến mất 15-20p · lag · ping tăng dù đã tắt):
+--  S1 single-instance guard (_G.__ABSV4_UNLOAD__) — hết hookfunction-stack chồng lớp mỗi re-execute
+--     (gốc rễ "ping tăng dù đã tắt": UNLOAD chỉ bóc 1 lớp; guard giữ stack = 1)
+--  S2 watchdog cứng hóa — notify nằm trong pcall (SetCore throw = chết watchdog = UI mất vĩnh viễn)
+--     + bắt Enabled=false + thread-ref cancel khi unload
+--  S3 refreshKillerCache debounce 0.25s — hết GetDescendants full-scan mỗi Heartbeat + bão O(n²) đầu round
+--  S4 getPing cache 0.5s — detect-ping không còn 2 pcall mỗi frame
+-- 8 fix (chi tiết: AUTO_BACKSTAB_V4_STABILITY_SAFETY.md §4):
+--  1 speed động mỗi sequence (bản gốc cache top-level → chết âm thầm sau respawn)
+--  2 parent-check + WaitForChild timeout (chống deadlock 'running')
+--  3 hook ngắn-mạch khi không active (perf + footprint; tắt toggle = passthrough)
+--  4 CharacterReplication require 1 lần top-level (bỏ yield-in-hook)
+--  5 pcall + cleanup gom chung (mọi error-path đều hoàn nguyên pivot/speed)
+--  6 (v4.5.0 ĐÃ XÓA theo tester) moredirect — vô dụng + thiếu an toàn; xem §9
+--  7 UNLOAD button — hoàn nguyên FireServerConnection + disconnect + destroy GUI
+--  8 killer model cache theo ChildAdded/ChildRemoved (scan vẫn GetDescendants — A114 vá regression)
+--  9 (A115) biến thể nguồn v4 vứt behindStudsBox -> crash IsFocused mỗi frame: gán lại + guard nil
+-- 11 (A120) CROSS-STAB CHOREOGRAPHY cho DASHSTAB (tester feedback): claim vị trí đi theo
+--     đường chéo P0-thật → ngang-sau-lưng-killer → điểm sau-lưng chuẩn, tốc ~lunge — thay vì
+--     teleport tức thời. Cửa sổ dashstab tự giãn theo độ dài đường đi (path/speed + hold).
+--     Nhánh M1 giữ nguyên (đã đọc là trickstab). LƯU Ý: nhiều packet spoof hơn nhánh cũ.
+-- 10 (A116) defaults theo user: DISTANCE CHECK ON @ 25 studs (7 = tự chết; 25 phủ lunge 12-22
+--     + chặn spoof xa). Còn lại giữ mặc định tối giản — ADV: bật lại Auto Studs nếu đâm killer chạy
+-- LƯU Ý AN TOÀN (không fix được từ client): spoof vị trí + pulse y=-90000 vẫn là
+-- bằng chứng vĩnh viễn phía server — đọc §2 doc trước khi dùng. (v4.5.0: moredirect ĐÃ XÓA — phần còn lại: spoof vị trí đường chéo plausible.)
+-- LocalScript
+-- [NGUỒN: user paste 2026-09-14 — script cộng đồng "auto backstab v4", NGUYÊN VẸN KHÔNG SỬA]
+-- [Dòng "-- phân tích nguyên lí hoạt động" đầu bản paste = yêu cầu của user, không phải của script]
+-- [Phân tích: AUTO_BACKSTAB_V4_ANALYSIS.md · Ledger A53]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+local StarterGui = game:GetService("StarterGui")
+
+local function notify(title, text, duration)
+    pcall(function() -- v4.6.1: SetCore throw (game override/limit) không giết button-handler
+        StarterGui:SetCore("SendNotification", {
+            Title = title,
+            Text = text,
+            Duration = duration or 5
+        })
+    end)
+end
+
+local notifya = true
+
+
+
+local version = "2.0"
+local abttExport
+local ABTT_TEL = { t0 = os.time(), seqs = {} }
+local ABTT_fps, ABTT_fpsAcc, ABTT_fpsN, ABTT_fpsAt = 0, 0, 0, os.clock()
+
+local lp = Players.LocalPlayer
+
+-- Single-instance guard: isolated slot so ABM coexists with NergPlus
+for _, slot in ipairs({ "__ABM_V2_UNLOAD__" }) do
+	local f = _G[slot]
+	if type(f) == "function" then
+		pcall(f)
+		_G[slot] = nil
+	end
+end
+task.wait(0.1)
+
+local conns = {}
+local function keep(conn)
+	table.insert(conns, conn)
+	return conn
+end
+local requestUnload = nil
+local TARGET_ANIMATION_ID = "100725497418533"
+local DASHSTAB_ANIM_ID = "89448354637442"
+local LUNGE_END_ANIM_ID = "119434518007321"
+
+-- Configuration Variables (Tuned for TwoTime DaggerWindup = 0.3s & Pro Trickstab Insurance)
+local isEnabled = true
+local isAutoStudsEnabled = false
+local isDetectPingEnabled = false
+
+local choreo = nil
+local distcheck = true
+local distcheckstud = 9.5
+
+local startdelay = 0.05
+local duration = 0.35
+local behindstuds = 3.5
+
+local doitmate = false
+local lungeEndedFlag = false
+local crouchStartAt = nil
+local abttDead = false
+local seqKillerRef = nil
+local claimCount = 0
+
+-- Dynamic Offset Variables
+local autoStandStuds = 5.0
+local autoRunStuds = 3.2
+
+-- Lunge Assist Variables
+local isDashstabEnabled = false
+local dsStartDelay = 0.08
+local dsWallCheck = true
+local dsProxGate = true
+local dsProxStuds = 12
+local autoAimEnabled = true
+
+local running = false
+-- v4.3.3 (A131): forward decls — buildUI() gan lai sau moi lan game don UI; engine doc nhu cu
+local behindStudsBox = nil -- v1.1-tt: WindUI Input element (engine auto-studs Set() vào đây)
+local Window, uiCanary = nil, nil -- v1.1-tt: WindUI window + canary cho watchdog
+local lastBoxSync = 0 -- v1.1-tt: throttle Set() hộp Behind Studs
+local uiUnloaded = false
+
+-- ==========================================
+-- UI — WINDUI (A160: owner yêu cầu đổi UI sang WindUI)
+-- ==========================================
+local WindUI
+do
+	local ok, result = pcall(function()
+		return loadstring(game:HttpGet("https://raw.githubusercontent.com/Footagesus/WindUI/7dd8a34a6bb59635c7b5f18ce9d46558a8cde138/dist/main.lua"))()
+	end)
+	if not ok or type(result) ~= "table" then
+		warn("[ABM] Failed to load WindUI library.")
+		pcall(function()
+			StarterGui:SetCore("SendNotification", {
+				Title = "ABM",
+				Text = "Failed to load UI library.",
+				Duration = 6,
+			})
+		end)
+		return
+	end
+	WindUI = result
+end
+
+local function getGuiParent()
+	local ok, ui = pcall(function()
+		if type(gethui) == "function" then return gethui() end
+		return nil
+	end)
+	if ok and ui then return ui end
+	local ok2 = pcall(function() return CoreGui.Name end)
+	if ok2 then return CoreGui end
+	return lp:WaitForChild("PlayerGui")
+end
+
+local function buildUI()
+	local themeName = "Dark"
+	pcall(function()
+		if type(WindUI.AddTheme) == "function" then
+			WindUI:AddTheme({
+				Name = "Ocean",
+				Accent = "#0ea5e9",
+				Dialog = "#0b131e",
+				Outline = "#1e3a5f",
+				Text = "#f0f9ff",
+				Placeholder = "#64748b",
+				Background = "#09101a",
+				Button = "#0284c7",
+				Icon = "#38bdf8",
+			})
+			themeName = "Ocean"
+		end
+	end)
+
+	Window = WindUI:CreateWindow({
+		Title = "ABM",
+		Author = "Two Time · Anniversary Edition",
+		Icon = "sword",
+		Folder = "ABM_v2",
+		ToggleKey = Enum.KeyCode.RightControl,
+		Size = UDim2.fromOffset(550, 420),
+		Theme = themeName,
+		HideSearchBar = true,
+	})
+	Window:Tag({ Title = "v" .. version .. " Ocean", Icon = "Anchor", Color = Color3.fromHex("#0284c7"), Border = true })
+
+	local mainTab = Window:Tab({ Title = "Core", Icon = "shield" })
+	local daggerTab = Window:Tab({ Title = "Dagger", Icon = "crosshair" })
+	local dsTab = Window:Tab({ Title = "Lunge", Icon = "zap" })
+
+	mainTab:Toggle({
+		Title = "Backstab Assist",
+		Desc = "Lock backstab angle during Dagger swing",
+		Value = isEnabled,
+		Flag = "MainEnabled",
+		Callback = function(v) isEnabled = v end,
+	})
+	mainTab:Toggle({
+		Title = "Range Gate",
+		Desc = "Only activate within Trigger Range",
+		Value = distcheck,
+		Flag = "DistanceCheck",
+		Callback = function(v) distcheck = v end,
+	})
+	mainTab:Input({
+		Title = "Trigger Range",
+		Desc = "Max activation distance (9.5 = Pro Insurance)",
+		Value = tostring(distcheckstud),
+		InputIcon = "ruler",
+		Flag = "DistStuds",
+		Callback = function(t)
+			local n = tonumber(t)
+			if n and n >= 4 then distcheckstud = n end
+		end,
+	})
+	behindStudsBox = mainTab:Input({
+		Title = "Back Offset",
+		Desc = "Target distance behind Killer",
+		Value = tostring(behindstuds),
+		InputIcon = "move-3d",
+		Flag = "BehindStuds",
+		Callback = function(t)
+			local n = tonumber(t)
+			if n and n > 0 then behindstuds = n end
+		end,
+	})
+	mainTab:Input({
+		Title = "Swing Delay",
+		Value = tostring(startdelay),
+		InputIcon = "timer",
+		Flag = "StartDelayM1",
+		Callback = function(t)
+			local n = tonumber(t)
+			if n and n >= 0 then startdelay = n end
+		end,
+	})
+	mainTab:Input({
+		Title = "Active Window",
+		Desc = "0.35s covers 0.30s Dagger windup",
+		Value = tostring(duration),
+		InputIcon = "timer",
+		Flag = "Duration",
+		Callback = function(t)
+			local n = tonumber(t)
+			if n and n > 0 then duration = n end
+		end,
+	})
+	mainTab:Toggle({
+		Title = "Dynamic Offset",
+		Desc = "Scale Back Offset by Killer movement speed",
+		Value = isAutoStudsEnabled,
+		Flag = "AutoStuds",
+		Callback = function(v) isAutoStudsEnabled = v end,
+	})
+	mainTab:Toggle({
+		Title = "Ping Scaling",
+		Desc = "Compensate Dynamic Offset for network latency",
+		Value = isDetectPingEnabled,
+		Flag = "DetectPing",
+		Callback = function(v) isDetectPingEnabled = v end,
+	})
+	mainTab:Input({
+		Title = "Idle Offset",
+		Value = tostring(autoStandStuds),
+		InputIcon = "person-standing",
+		Flag = "StandStuds",
+		Callback = function(t)
+			local n = tonumber(t)
+			if n and n > 0 then autoStandStuds = n end
+		end,
+	})
+	mainTab:Input({
+		Title = "Chase Offset",
+		Value = tostring(autoRunStuds),
+		InputIcon = "footprints",
+		Flag = "RunStuds",
+		Callback = function(t)
+			local n = tonumber(t)
+			if n and n > 0 then autoRunStuds = n end
+		end,
+	})
+	mainTab:Button({
+		Title = "Save Session Log",
+		Icon = "download",
+		Color = Color3.fromHex("#0369a1"),
+		Justify = "Center",
+		Callback = function()
+			if abttExport then abttExport() end
+		end,
+	})
+	mainTab:Button({
+		Title = "Unload",
+		Icon = "power",
+		Color = Color3.fromHex("#334155"),
+		Justify = "Center",
+		Callback = function()
+			if requestUnload then
+				requestUnload()
+			else
+				notify("ABM", "Wait for initialization to finish.", 4)
+			end
+		end,
+	})
+
+	daggerTab:Toggle({
+		Title = "Horizontal Aim",
+		Desc = "Face target horizontally during swing",
+		Value = autoAimEnabled,
+		Flag = "AutoAim",
+		Callback = function(v) autoAimEnabled = v end,
+	})
+
+	dsTab:Toggle({
+		Title = "Lunge Assist",
+		Desc = "Backstab insurance on crouch-lunge",
+		Value = isDashstabEnabled,
+		Flag = "Dashstab",
+		Callback = function(v) isDashstabEnabled = v end,
+	})
+	dsTab:Toggle({
+		Title = "Wall Check",
+		Desc = "Require clear line of sight to target",
+		Value = dsWallCheck,
+		Flag = "DSWallCheck",
+		Callback = function(v) dsWallCheck = v end,
+	})
+	dsTab:Toggle({
+		Title = "Proximity Gate",
+		Desc = "Wait until lunge reaches Connect Range",
+		Value = dsProxGate,
+		Flag = "DSProxGate",
+		Callback = function(v) dsProxGate = v end,
+	})
+	dsTab:Input({
+		Title = "Connect Range",
+		Value = tostring(dsProxStuds),
+		InputIcon = "ruler",
+		Flag = "DSProxStuds",
+		Callback = function(t)
+			local n = tonumber(t)
+			if n and n >= 5 then dsProxStuds = n end
+		end,
+	})
+	dsTab:Input({
+		Title = "Lunge Delay",
+		Value = tostring(dsStartDelay),
+		InputIcon = "timer",
+		Flag = "StartDelay",
+		Callback = function(t)
+			local n = tonumber(t)
+			if n and n >= 0 then dsStartDelay = n end
+		end,
+	})
+
+	uiCanary = Instance.new("ScreenGui")
+	uiCanary.Name = "ABM_V2_CANARY"
+	uiCanary.ResetOnSpawn = false
+	uiCanary.DisplayOrder = -999
+	local cFrame = Instance.new("Frame")
+	cFrame.Size = UDim2.new(0, 1, 0, 1)
+	cFrame.BackgroundTransparency = 1
+	cFrame.Parent = uiCanary
+	uiCanary.Parent = getGuiParent()
+end
+
+buildUI()
+
+local watchdogThread
+watchdogThread = task.spawn(function()
+	while true do
+		task.wait(2)
+		pcall(function()
+			if not uiUnloaded and uiCanary then
+				if uiCanary.Parent == nil or #uiCanary:GetChildren() == 0 then
+					local ok = pcall(buildUI)
+					if ok then
+						notify("ABM", "UI restored after round reset.", 3)
+					end
+				end
+			end
+		end)
+	end
+end)
+
+-- ==========================================
+-- SCRIPT LOGIC
+-- ==========================================
+
+-- v2.0-tt: cleanup gom chung — khôi phục AutoRotate an toàn trên mọi error-path
+local function finishSequence(humanoid, oldAutoRotate)
+	if humanoid and humanoid.Parent and oldAutoRotate ~= nil then
+		pcall(function() humanoid.AutoRotate = oldAutoRotate end)
+	end
+end
+
+local function getKillerFolder()
+	local playersFolder = workspace:FindFirstChild("Players")
+	if not playersFolder then return nil end
+	return playersFolder:FindFirstChild("Killers")
+end
+
+-- v4.1 fix #8: cache killer model, refresh theo ChildAdded/ChildRemoved
+-- A114: scan dùng GetDescendants (GIỮ NGUYÊN semantics v4 gốc — model killer lồng sâu,
+-- GetChildren sẽ không thấy → regression autostuds chết + spoof chết, user bắt được)
+local cachedKillerModel = nil
+-- v4.4 (A150) FIX LAG-1: debounce 0.25s — bản cũ: cache rỗng (giữa round/killer chết) thì
+-- Heartbeat gọi GetDescendants() FULL-SCAN MỖI FRAME (60-144Hz, mỗi lần 1 array mới cho GC)
+-- + bão ChildAdded đầu round quét O(n²) → nguồn lag chính khi dùng dài. Giờ: tối đa 4 scan/s.
+local lastScanAt = 0
+local function refreshKillerCache(force)
+	-- v4.5.1: bỏ debounce khi đang sequence (doitmate) — cache trễ ≤0.25s giữa dashstab làm
+	-- hook passthrough packet THẬT đúng lúc cần claim sau lưng
+	if not force and not doitmate and os.clock() - lastScanAt < 0.25 then return end
+	lastScanAt = os.clock()
+	cachedKillerModel = nil
+	local killerFolder = getKillerFolder()
+	if not killerFolder then return end
+	for _, inst in ipairs(killerFolder:GetDescendants()) do
+		if inst:IsA("Model") then
+			local hum = inst:FindFirstChildOfClass("Humanoid")
+			local hrp = inst:FindFirstChild("HumanoidRootPart")
+			if hum and hrp and hum.Health > 0 then
+				cachedKillerModel = inst
+				return
+			end
+		end
+	end
+end
+
+local function getFirstValidKillerModel()
+	local m = cachedKillerModel
+	-- A114: IsDescendantOf(workspace) thay m.Parent — bắt cả trường hợp ancestor bị remove
+	-- (m.Parent vẫn non-nil trên object đã rời cây)
+	if m and m:IsDescendantOf(workspace) then
+		local hum = m:FindFirstChildOfClass("Humanoid")
+		if hum and hum.Health > 0 and m:FindFirstChild("HumanoidRootPart") then return m end
+	end
+	refreshKillerCache()
+	return cachedKillerModel
+end
+
+-- v1.4.2-tt (A540): trong-sequence dùng model-cache (vẫn-đọc VỊ-TRÍ live từ model —
+-- homing không đổi); model chết/mất-cây mới cho refresh. GetDescendants full-scan
+-- mỗi-frame/packet trong sequence là nguồn fps-dip 0.2-0.5s (v4.5.1 bỏ-debounce).
+local function abttSeqKiller()
+	if seqKillerRef and seqKillerRef:IsDescendantOf(workspace) then
+		local h = seqKillerRef:FindFirstChildOfClass("Humanoid")
+		if h and h.Health > 0 and seqKillerRef:FindFirstChild("HumanoidRootPart") then
+			return seqKillerRef
+		end
+	end
+	seqKillerRef = getFirstValidKillerModel()
+	return seqKillerRef
+end
+
+task.spawn(function()
+	local folder = getKillerFolder()
+	local tries = 0
+	while not folder and tries < 60 do
+		tries = tries + 1
+		task.wait(1)
+		folder = getKillerFolder()
+	end
+	if folder then
+		keep(folder.ChildAdded:Connect(function() refreshKillerCache() end))
+		keep(folder.ChildRemoved:Connect(function() cachedKillerModel = nil end))
+		refreshKillerCache()
+	end
+end)
+
+-- v4.4 (A150) FIX LAG-2: cache 0.5s — detect-ping bật thì getPing() chạy MỖI Heartbeat
+-- (60-144Hz, mỗi lần 2 pcall + đọc Stats) → giờ tối đa 2 lần/s.
+local pingCache, pingCacheAt = 0, 0
+local function getPing()
+	local now = os.clock()
+	if now - pingCacheAt < 0.5 then return pingCache end
+	local success, val = pcall(function()
+		return game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue()
+	end)
+	if success and val then pingCache, pingCacheAt = val, now; return val; end
+
+	local success2, val2 = pcall(function()
+		return lp:GetNetworkPing() * 1000
+	end)
+	if success2 and val2 then pingCache, pingCacheAt = val2, now; return val2; end
+
+	pingCache, pingCacheAt = 20, now
+	return 20 -- Default fallback ping
+end
+
+-- v1.4.1-tt (A539): DỰ-ĐOÁN-YAW-KILLER — killer xoay-nhanh làm điểm-sau-lưng-stale
+-- ở server (trễ nửa-RTT + kiểm lúc đòn-rơi). Đo tốc-yaw giữa các packet → ngoại-suy
+-- hướng sau hor = ping/2 + 0.10s (clamp 0.05–0.25) · clamp |rate|≤6 rad/s (fidget-spin)
+-- · lead-vị-trí-ngang-nhẹ (<30 studs/s) · rate≈0 → GIỐNG-HỆT công-thức-cũ (A215).
+local lastKYaw, lastKYawAt, kYawRate = nil, nil, 0
+local predLed = 0 -- đếm-số-packet-có-dự-đoán (console-led falsifiable)
+local function resetYawPredictor()
+	lastKYaw, lastKYawAt, kYawRate = nil, nil, 0
+end
+local function predictedBehindTarget(killerHrp, behindstuds)
+	local cf = killerHrp.CFrame
+	local lv = cf.LookVector
+	local yaw = math.atan2(-lv.X, -lv.Z)
+	local now = os.clock()
+	if not lastKYaw or not lastKYawAt then
+		lastKYaw, lastKYawAt, kYawRate = yaw, now, 0
+	else
+		local dt = now - lastKYawAt
+		if dt >= 0.5 then
+			lastKYaw, lastKYawAt, kYawRate = yaw, now, 0
+		elseif dt >= 0.015 then
+			local d = yaw - lastKYaw
+			if d > math.pi then d = d - 2 * math.pi elseif d < -math.pi then d = d + 2 * math.pi end
+			local inst = math.clamp(d / dt, -6, 6)
+			kYawRate = kYawRate * 0.5 + inst * 0.5
+			lastKYaw, lastKYawAt = yaw, now
+		end
+	end
+	local hor = math.clamp(getPing() * 0.0005 + 0.10, 0.05, 0.25)
+	local yawP = yaw + kYawRate * hor
+	local lvP = Vector3.new(-math.sin(yawP), 0, -math.cos(yawP))
+	local kpos = cf.Position
+	local kvel = killerHrp.AssemblyLinearVelocity
+	if kvel.Magnitude < 30 then
+		kpos = kpos + Vector3.new(kvel.X, 0, kvel.Z) * hor
+	end
+	if math.abs(kYawRate) > 0.5 then predLed = predLed + 1 end
+	local c = kpos - lvP * behindstuds
+	return CFrame.lookAt(c, kpos)
+end
+local function abttCtx()
+	return string.format("v%s | %s | %dms | %dfps", version,
+		identifyexecutor and identifyexecutor() or "executor",
+		math.floor(getPing() + 0.5), ABTT_fps)
+end
+local function abttTier(dh)
+	if dh >= 20 then return "backstab" end
+	if dh >= 8 then return "front" end
+	if dh == 0 then return "miss" end
+	return "unknown"
+end
+abttExport = function()
+	local n = { ds = 0, m1 = 0, dsReg = 0, dsFront = 0, dsMiss = 0 }
+	for _, s2 in ipairs(ABTT_TEL.seqs) do
+		if s2.br == "DS" then
+			n.ds = n.ds + 1
+			if s2.tier == "backstab" then n.dsReg = n.dsReg + 1
+			elseif s2.tier == "front" then n.dsFront = n.dsFront + 1
+			elseif s2.tier == "miss" then n.dsMiss = n.dsMiss + 1 end
+		else
+			n.m1 = n.m1 + 1
+		end
+	end
+	print(string.format("[ABM] %s | Lunge: %d (back:%d front:%d miss:%d) | Dagger: %d", abttCtx(), n.ds, n.dsReg, n.dsFront, n.dsMiss, n.m1))
+	if writefile then
+		local okW = pcall(function()
+			writefile("ABM_session_log.json", game:GetService("HttpService"):JSONEncode({
+				ctx = abttCtx(), version = version, t0 = ABTT_TEL.t0, seqs = ABTT_TEL.seqs,
+			}))
+		end)
+		if okW then notify("ABM", "Saved ABM_session_log.json", 3) end
+	end
+end
+
+local function runPlaceSequence()
+	if not isEnabled or running then return end
+	running = true
+
+	local tClaims = claimCount
+	local tLed = predLed
+	local tKm = getFirstValidKillerModel()
+	local tHum = tKm and tKm:FindFirstChildOfClass("Humanoid")
+	local tH0 = tHum and tHum.Health or -1
+
+	local character = lp.Character
+	if not character or not character.Parent then running = false; return; end
+	local hrp = character:WaitForChild("HumanoidRootPart", 5)
+	if not hrp then running = false; return; end
+
+	task.wait(startdelay)
+
+	if not character.Parent or not isEnabled then running = false; return; end
+
+	local hum = character:FindFirstChildOfClass("Humanoid")
+	local oldAutoRotate = hum and hum.AutoRotate or nil
+	if autoAimEnabled and hum then
+		pcall(function() hum.AutoRotate = false end)
+	end
+	resetYawPredictor()
+
+	local ok, err = pcall(function()
+		choreo = nil
+		local startTime = os.clock()
+		while os.clock() - startTime < duration do
+			if not character.Parent or not hrp.Parent or not isEnabled then break end
+			if autoAimEnabled then
+				local km = abttSeqKiller()
+				local khrp = km and km:FindFirstChild("HumanoidRootPart")
+				if khrp then
+					pcall(function()
+						local pos = hrp.Position
+						local flatDir = Vector3.new(khrp.Position.X - pos.X, 0, khrp.Position.Z - pos.Z)
+						if flatDir.Magnitude > 0.05 and hrp.CFrame.LookVector:Dot(flatDir.Unit) < 0.99939 then
+							hrp.CFrame = CFrame.lookAt(pos, pos + flatDir.Unit)
+						end
+					end)
+				end
+			end
+			doitmate = true
+			RunService.PreRender:Wait()
+		end
+	end)
+	doitmate = false
+	finishSequence(hum, oldAutoRotate)
+	if not ok then warn("[ABM] Dagger sequence error: " .. tostring(err)) end
+	task.delay(1.2, function()
+		local hum2 = tKm and tKm.Parent and tKm:FindFirstChildOfClass("Humanoid")
+		local dh = (hum2 and tH0 >= 0) and math.floor(tH0 - hum2.Health + 0.5) or -1
+		if #ABTT_TEL.seqs > 499 then table.remove(ABTT_TEL.seqs, 1) end
+		ABTT_TEL.seqs[#ABTT_TEL.seqs + 1] = { br = "M1", ts = os.time() - ABTT_TEL.t0, engage = -1, angle = -1, claims = claimCount - tClaims, led = predLed - tLed, dmg = dh, tier = abttTier(dh) }
+	end)
+	running = false
+end
+
+local function runDashstabSequence()
+	if not isDashstabEnabled or running then return end
+	running = true
+	lungeEndedFlag = false
+
+	local character = lp.Character
+	if not character or not character.Parent then running = false; return; end
+
+	local crouchElapsed = crouchStartAt and math.clamp(os.clock() - crouchStartAt, 0, 3.0) or 0
+	local estStun = 2.0 + 1.5 * (crouchElapsed / 3.0)
+
+	task.wait(dsStartDelay)
+
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	if not character.Parent or not hrp then running = false; return; end
+
+	local tClaims = claimCount
+	local tLed = predLed
+	local tKm = getFirstValidKillerModel()
+	local tHum = tKm and tKm:FindFirstChildOfClass("Humanoid")
+	local tH0 = tHum and tHum.Health or -1
+	local tEngage = -1
+	local seqDuration = duration
+	local tAngle = -1
+	local tWall = false
+	local dsRayParams = RaycastParams.new()
+	dsRayParams.FilterType = Enum.RaycastFilterType.Exclude
+	dsRayParams.FilterDescendantsInstances = tKm and { character, tKm } or { character }
+	do
+		local km0 = tKm and tKm:FindFirstChild("HumanoidRootPart")
+		if km0 and hrp then
+			local hit = workspace:Raycast(hrp.Position, km0.Position - hrp.Position, dsRayParams)
+			tWall = hit ~= nil
+		end
+	end
+	do
+		local khrp0 = tKm and tKm:FindFirstChild("HumanoidRootPart")
+		if khrp0 and hrp then
+			local dir = (khrp0.Position - hrp.Position) * Vector3.new(1, 0, 1)
+			local kl = khrp0.CFrame.LookVector * Vector3.new(1, 0, 1)
+			if dir.Magnitude > 0.05 and kl.Magnitude > 0.05 then
+				tAngle = math.deg(math.acos(math.clamp(dir.Unit:Dot(kl.Unit), -1, 1)))
+			end
+		end
+	end
+
+	resetYawPredictor()
+	local ok, err = pcall(function()
+		choreo = nil
+		seqDuration = duration
+		do
+			local km = abttSeqKiller()
+			local khrp = km and km:FindFirstChild("HumanoidRootPart")
+			if khrp and hrp then
+				local rel = khrp.CFrame:PointToObjectSpace(hrp.Position)
+				local side = rel.X >= 0 and 1 or -1
+				local engage = (khrp.Position - hrp.Position).Magnitude
+				local eta = math.max(0.10, engage / 30)
+				choreo = { t0 = os.clock(), p0 = hrp.Position, side = side, eta = eta }
+				seqDuration = math.max(eta + 0.15, 0.55)
+				tEngage = engage
+			end
+		end
+
+		local startTime = os.clock()
+		while os.clock() - startTime < seqDuration do
+			if not character.Parent or not hrp.Parent or not isDashstabEnabled or lungeEndedFlag then break end
+			local canClaim = true
+			local km = abttSeqKiller()
+			local khrp = km and km:FindFirstChild("HumanoidRootPart")
+			if khrp then
+				local delta = khrp.Position - hrp.Position
+				if dsProxGate and delta.Magnitude > dsProxStuds then
+					canClaim = false
+				end
+				if canClaim and dsWallCheck then
+					local hit = workspace:Raycast(hrp.Position, delta, dsRayParams)
+					if hit then
+						canClaim = false
+						tWall = true
+					end
+				end
+			else
+				canClaim = false
+			end
+			doitmate = canClaim
+			RunService.PreRender:Wait()
+		end
+	end)
+	choreo = nil
+	doitmate = false
+	if not ok then warn("[ABM] Lunge sequence error: " .. tostring(err)) end
+	task.delay(1.2, function()
+		local hum2 = tKm and tKm.Parent and tKm:FindFirstChildOfClass("Humanoid")
+		local dh = (hum2 and tH0 >= 0) and math.floor(tH0 - hum2.Health + 0.5) or -1
+		if #ABTT_TEL.seqs > 499 then table.remove(ABTT_TEL.seqs, 1) end
+		ABTT_TEL.seqs[#ABTT_TEL.seqs + 1] = { br = "DS", ts = os.time() - ABTT_TEL.t0, engage = tEngage, angle = tAngle, wall = tWall and 1 or 0, window = seqDuration, stunEst = tonumber(string.format("%.2f", estStun)), claims = claimCount - tClaims, led = predLed - tLed, dmg = dh, tier = abttTier(dh) }
+	end)
+	running = false
+end
+
+local player = Players.LocalPlayer
+
+-- Wait for the Network module
+local NetworkModule = require(game:GetService("ReplicatedStorage"):WaitForChild("Modules"):WaitForChild("Network"):WaitForChild("Network"))
+-- v4.1 fix #4: require MỘT lần top-level — hook không được yield
+local CharacterReplication = require(game:GetService("ReplicatedStorage"):WaitForChild("Systems"):WaitForChild("Player"):WaitForChild("Game"):WaitForChild("CharacterReplication"))
+
+-- [A603] FIX "Key 'Network' not found in external type 'Instance'": giờ phận-hỏi
+-- NetworkModule.FireServerConnection qua rawget trên BẢNG-require (không-index-Instance
+-- — sandbox/Real-analysis chặn index-member Instance-bằng-string). Đúng-runtime:
+-- require(Network) trả bảng 9-key gồm FireServerConnection (đã-diagnostic A603).
+local __FSC_raw = rawget(NetworkModule, "FireServerConnection")
+if typeof(__FSC_raw) ~= "function" then
+  warn("[ABTT-A603] FireServerConnection không-còn trong module Network — hook vị trí khác / game-đổi: TT-vẫn-chạy-không-claim (passthrough)")
+end
+local oldFireServerConnection; oldFireServerConnection = __FSC_raw and hookfunction(__FSC_raw, function(self, connectionName, eventType, ...)
+	-- v4.1 fix #3: ngắn mạch khi không liên quan / không active — hook gần như zero-cost khi OFF
+	if not oldFireServerConnection then return end -- [A603] không-hook-được → đi-thẳng-gốc
+	if connectionName ~= "UpdateCharacterPosition" then
+		return oldFireServerConnection(self, connectionName, eventType, ...)
+	end
+	if abttDead or not oldFireServerConnection then if oldFireServerConnection then return oldFireServerConnection(self, connectionName, eventType, ...) end return end -- [A603] -- v1.4.2-tt (A540): unload = passthrough-VĨNH-VIỄN (dù-restore-xuỵt/captured-ref)
+	if not doitmate or not oldFireServerConnection then -- v4.5.0 + [A603] ngoài-sequence / không-hook = passthrough
+		if oldFireServerConnection then return oldFireServerConnection(self, connectionName, eventType, ...) end
+		return
+	end
+
+	local args = {...}
+	local character = player.Character
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	local killerModel = abttSeqKiller() -- v1.4.2-tt (A540) cache-per-sequence (mỗi-packet không-scan)
+	local killerHrp = killerModel and killerModel:FindFirstChild("HumanoidRootPart")
+
+	if hrp and killerHrp then
+		if doitmate then
+			local targetCFrame
+			-- v1.4.0-tt (A215): ENDPOINT-CLAIM M1-style — claim THẲNG tới điểm sau lưng killer
+			-- từ packet ĐẦU TIÊN và GIỮ liên tục qua contact (A203: server đánh giá khi hitbox DS
+			-- chạm sau lưng — chỉ cần vị trí đẹp ĐÚNG lúc đó · A209: front 17.9% = contact giữa
+			-- đường khi claim còn ở hông/trước mặt vì curve Bézier v4.3.3). Endpoint LIVE-HOMED
+			-- từng packet (killer chạy → đích bám theo — giữ từ v4.3.3). Lunge vật lý THẬT giữ
+			-- nguyên, KHÔNG PivotTo (brand "không direct"). Falsifiable: nếu miss (0 dmg) không
+			-- giảm → server đánh giá theo vật lý, không theo claim → layer homing/auto-trigger.
+			targetCFrame = predictedBehindTarget(killerHrp, behindstuds) -- v1.4.1-tt (A539): aim-lock lưng-BẢN-ĐOÁN (dự-đoán-yaw)
+			args[1] = CharacterReplication.Serialize(targetCFrame, hrp.AssemblyLinearVelocity)
+			claimCount = claimCount + 1 -- v4.6.1 telemetry-lite
+		end
+	end
+
+	return oldFireServerConnection(self, connectionName, eventType, unpack(args))
+end)
+
+local function check(hrp1, hrp2, range)
+	if not hrp1 or not hrp2 then
+		return false
+	end
+
+	return (hrp1.Position - hrp2.Position).Magnitude <= range
+end
+
+local function hookCharacter(character)
+	local humanoid = character:WaitForChild("Humanoid", 5)
+	if not humanoid then return end
+	local animator = humanoid:FindFirstChild("Animator")
+	if not animator then return end
+	crouchStartAt = character:GetAttribute("Crouching") and os.clock() or nil
+	keep(character:GetAttributeChangedSignal("Crouching"):Connect(function()
+		if character:GetAttribute("Crouching") then
+			crouchStartAt = os.clock()
+		else
+			crouchStartAt = nil
+		end
+	end))
+	keep(animator.AnimationPlayed:Connect(function(track)
+		if not track or not track.Animation then return end
+		local id = tostring(track.Animation.AnimationId or ""):gsub("%D", "")
+		if id == LUNGE_END_ANIM_ID then
+			lungeEndedFlag = true
+			doitmate = false
+			return
+		end
+		local killer = getFirstValidKillerModel()
+		if not killer then return end
+
+		if (id == TARGET_ANIMATION_ID or id == "106086955212611") and isEnabled then
+			if distcheck then
+				if not check(character.HumanoidRootPart, killer.HumanoidRootPart, distcheckstud) then return end
+			end
+			task.spawn(runPlaceSequence)
+		elseif (id == DASHSTAB_ANIM_ID or id == "107640065977686") and isDashstabEnabled then
+			if distcheck then
+				if not check(character.HumanoidRootPart, killer.HumanoidRootPart, math.max(distcheckstud, 24)) then return end
+			end
+			task.spawn(runDashstabSequence)
+		end
+	end))
+end
+
+-- Variables for manual speed calculation
+local lastKillerModel = nil
+local lastKillerPos = nil
+local smoothedSpeed = 0
+local speedSampleDt = 0
+
+-- Hook into physics steps to calculate Auto Studs based on Position Delta & Ping
+keep(RunService.Heartbeat:Connect(function(dt)
+	-- v1.3.1-tt: fps counter (cho ctx — throttled 0.5s)
+	ABTT_fpsAcc = ABTT_fpsAcc + dt
+	ABTT_fpsN = ABTT_fpsN + 1
+	if os.clock() - ABTT_fpsAt >= 0.5 and ABTT_fpsAcc > 0 then
+		ABTT_fps = math.floor(ABTT_fpsN / ABTT_fpsAcc + 0.5)
+		ABTT_fpsAcc, ABTT_fpsN, ABTT_fpsAt = 0, 0, os.clock()
+	end
+	if isAutoStudsEnabled then
+		local killerModel = getFirstValidKillerModel()
+		if killerModel then
+			local killerHrp = killerModel:FindFirstChild("HumanoidRootPart")
+			if killerHrp then
+				local currentPos = killerHrp.Position
+			speedSampleDt = speedSampleDt + dt
+			if lastKillerModel ~= killerModel or not lastKillerPos then
+				lastKillerModel = killerModel
+				lastKillerPos = currentPos
+				speedSampleDt = 0
+			elseif speedSampleDt >= 0.015 then
+				local horizontalDelta = Vector3.new(currentPos.X, 0, currentPos.Z) - Vector3.new(lastKillerPos.X, 0, lastKillerPos.Z)
+				local deltaSpeed = horizontalDelta.Magnitude / speedSampleDt
+				local kvel = killerHrp.AssemblyLinearVelocity
+				local velSpeed = Vector3.new(kvel.X, 0, kvel.Z).Magnitude
+				local rawSpeed = (velSpeed > 0.5) and (deltaSpeed * 0.5 + velSpeed * 0.5) or deltaSpeed
+				smoothedSpeed = smoothedSpeed + (rawSpeed - smoothedSpeed) * math.min(speedSampleDt * 15, 1)
+				lastKillerPos = currentPos
+				speedSampleDt = 0
+			end
+			local finalSpeed = math.clamp(smoothedSpeed, 0, 30)
+				
+				-- Determine target studs at max run speed (26 velocity)
+				local studsAtRun = autoRunStuds
+				if isDetectPingEnabled then
+					local ping = getPing()
+					local clampedPing = math.max(ping, 20)
+					-- Linear map between ping 20 (autoRunStuds) and ping 120 (autoRunStuds - 1.5)
+					studsAtRun = autoRunStuds - ((clampedPing - 20) / 100) * 1.5
+					studsAtRun = math.max(studsAtRun, 1.0) -- Safety cap
+				end
+				
+				-- Calculate actual studs based on current speed
+				local slope = (autoStandStuds - studsAtRun) / 26.0
+				local calculatedStuds = autoStandStuds - (finalSpeed * slope)
+				
+				behindstuds = calculatedStuds
+				
+				-- v1.1-tt (A160): WindUI Input element không có IsFocused() — Set() throttle
+				if behindStudsBox and os.clock() - lastBoxSync > 0.25 then
+					lastBoxSync = os.clock()
+					pcall(function() behindStudsBox:Set(string.format("%.1f", calculatedStuds)) end)
+				end
+			else
+				lastKillerModel = nil
+			end
+		else
+			lastKillerModel = nil
+			smoothedSpeed = 0
+		end
+	else
+		lastKillerModel = nil
+		smoothedSpeed = 0
+	end
+end))
+
+requestUnload = function()
+	abttDead = true
+	pcall(function() if abttExport then abttExport() end end)
+	_G.__ABM_V2_UNLOAD__ = nil
+	pcall(function() task.cancel(watchdogThread) end)
+	pcall(function() if oldFireServerConnection then NetworkModule.FireServerConnection = oldFireServerConnection end end)
+	for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+	table.clear(conns)
+	isEnabled = false
+	isDashstabEnabled = false
+	doitmate = false
+	uiUnloaded = true
+	notify("ABM", "Unloaded.", 3)
+	pcall(function()
+		if Window then Window:Destroy() end
+		if uiCanary then uiCanary:Destroy() end
+	end)
+end
+
+if lp.Character then
+	hookCharacter(lp.Character)
+end
+
+keep(lp.CharacterAdded:Connect(hookCharacter))
+
+_G.__ABM_V2_UNLOAD__ = requestUnload
+print("[ABM] v2.0 Ocean Anniversary Edition loaded.")
