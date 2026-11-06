@@ -78,10 +78,6 @@ local function notify(title, text, duration)
     end)
 end
 
-local notifya = true
-
-
-
 local version = "2.0"
 local abttExport
 local ABTT_TEL = { t0 = os.time(), seqs = {} }
@@ -109,7 +105,7 @@ local TARGET_ANIMATION_ID = "100725497418533"
 local DASHSTAB_ANIM_ID = "89448354637442"
 local LUNGE_END_ANIM_ID = "119434518007321"
 
--- Configuration Variables (Tuned for TwoTime DaggerWindup = 0.3s & Pro Trickstab Insurance)
+-- Configuration Variables
 local isEnabled = true
 local isAutoStudsEnabled = false
 local isDetectPingEnabled = false
@@ -129,12 +125,15 @@ local abttDead = false
 local seqKillerRef = nil
 local claimCount = 0
 
--- Dynamic Offset Variables
+-- Auto Studs Variables
 local autoStandStuds = 5.0
 local autoRunStuds = 3.2
 
--- Lunge Assist Variables
+-- Dashstab Variables
 local isDashstabEnabled = false
+local dsAimEnabled = true
+local noCrouchSlow = true
+local crouchHudEnabled = true
 local dsStartDelay = 0.08
 local dsWallCheck = true
 local dsProxGate = true
@@ -142,15 +141,11 @@ local dsProxStuds = 12
 local autoAimEnabled = true
 
 local running = false
--- v4.3.3 (A131): forward decls — buildUI() gan lai sau moi lan game don UI; engine doc nhu cu
-local behindStudsBox = nil -- v1.1-tt: WindUI Input element (engine auto-studs Set() vào đây)
-local Window, uiCanary = nil, nil -- v1.1-tt: WindUI window + canary cho watchdog
-local lastBoxSync = 0 -- v1.1-tt: throttle Set() hộp Behind Studs
+local behindStudsBox = nil
+local Window, uiCanary, stunHudLabel = nil, nil, nil
+local lastBoxSync = 0
 local uiUnloaded = false
 
--- ==========================================
--- UI — WINDUI (A160: owner yêu cầu đổi UI sang WindUI)
--- ==========================================
 local WindUI
 do
 	local ok, result = pcall(function()
@@ -202,37 +197,40 @@ local function buildUI()
 
 	Window = WindUI:CreateWindow({
 		Title = "ABM",
-		Author = "Two Time · Anniversary Edition",
+		Author = "Two Time",
 		Icon = "sword",
 		Folder = "ABM_v2",
 		ToggleKey = Enum.KeyCode.RightControl,
-		Size = UDim2.fromOffset(550, 420),
+		Size = UDim2.fromOffset(480, 360),
 		Theme = themeName,
 		HideSearchBar = true,
 	})
-	Window:Tag({ Title = "v" .. version .. " Ocean", Icon = "Anchor", Color = Color3.fromHex("#0284c7"), Border = true })
+	Window:Tag({ Title = "v" .. version, Icon = "sword", Color = Color3.fromHex("#0284c7"), Border = true })
 
-	local mainTab = Window:Tab({ Title = "Core", Icon = "shield" })
-	local daggerTab = Window:Tab({ Title = "Dagger", Icon = "crosshair" })
-	local dsTab = Window:Tab({ Title = "Lunge", Icon = "zap" })
+	local mainTab = Window:Tab({ Title = "Main", Icon = "home" })
+	local dsTab = Window:Tab({ Title = "Dashstab", Icon = "zap" })
+	local autoTab = Window:Tab({ Title = "Auto Studs", Icon = "sliders" })
 
 	mainTab:Toggle({
-		Title = "Backstab Assist",
-		Desc = "Lock backstab angle during Dagger swing",
+		Title = "Auto Backstab",
 		Value = isEnabled,
 		Flag = "MainEnabled",
 		Callback = function(v) isEnabled = v end,
 	})
 	mainTab:Toggle({
-		Title = "Range Gate",
-		Desc = "Only activate within Trigger Range",
+		Title = "Auto-Aim",
+		Value = autoAimEnabled,
+		Flag = "AutoAim",
+		Callback = function(v) autoAimEnabled = v end,
+	})
+	mainTab:Toggle({
+		Title = "Distance Check",
 		Value = distcheck,
 		Flag = "DistanceCheck",
 		Callback = function(v) distcheck = v end,
 	})
 	mainTab:Input({
-		Title = "Trigger Range",
-		Desc = "Max activation distance (9.5 = Pro Insurance)",
+		Title = "Stud Distance",
 		Value = tostring(distcheckstud),
 		InputIcon = "ruler",
 		Flag = "DistStuds",
@@ -242,8 +240,7 @@ local function buildUI()
 		end,
 	})
 	behindStudsBox = mainTab:Input({
-		Title = "Back Offset",
-		Desc = "Target distance behind Killer",
+		Title = "Behind Studs",
 		Value = tostring(behindstuds),
 		InputIcon = "move-3d",
 		Flag = "BehindStuds",
@@ -253,7 +250,7 @@ local function buildUI()
 		end,
 	})
 	mainTab:Input({
-		Title = "Swing Delay",
+		Title = "Start Delay",
 		Value = tostring(startdelay),
 		InputIcon = "timer",
 		Flag = "StartDelayM1",
@@ -263,57 +260,13 @@ local function buildUI()
 		end,
 	})
 	mainTab:Input({
-		Title = "Active Window",
-		Desc = "0.35s covers 0.30s Dagger windup",
+		Title = "Duration",
 		Value = tostring(duration),
 		InputIcon = "timer",
 		Flag = "Duration",
 		Callback = function(t)
 			local n = tonumber(t)
 			if n and n > 0 then duration = n end
-		end,
-	})
-	mainTab:Toggle({
-		Title = "Dynamic Offset",
-		Desc = "Scale Back Offset by Killer movement speed",
-		Value = isAutoStudsEnabled,
-		Flag = "AutoStuds",
-		Callback = function(v) isAutoStudsEnabled = v end,
-	})
-	mainTab:Toggle({
-		Title = "Ping Scaling",
-		Desc = "Compensate Dynamic Offset for network latency",
-		Value = isDetectPingEnabled,
-		Flag = "DetectPing",
-		Callback = function(v) isDetectPingEnabled = v end,
-	})
-	mainTab:Input({
-		Title = "Idle Offset",
-		Value = tostring(autoStandStuds),
-		InputIcon = "person-standing",
-		Flag = "StandStuds",
-		Callback = function(t)
-			local n = tonumber(t)
-			if n and n > 0 then autoStandStuds = n end
-		end,
-	})
-	mainTab:Input({
-		Title = "Chase Offset",
-		Value = tostring(autoRunStuds),
-		InputIcon = "footprints",
-		Flag = "RunStuds",
-		Callback = function(t)
-			local n = tonumber(t)
-			if n and n > 0 then autoRunStuds = n end
-		end,
-	})
-	mainTab:Button({
-		Title = "Save Session Log",
-		Icon = "download",
-		Color = Color3.fromHex("#0369a1"),
-		Justify = "Center",
-		Callback = function()
-			if abttExport then abttExport() end
 		end,
 	})
 	mainTab:Button({
@@ -325,52 +278,46 @@ local function buildUI()
 			if requestUnload then
 				requestUnload()
 			else
-				notify("ABM", "Wait for initialization to finish.", 4)
+				notify("ABM", "Not ready yet.", 3)
 			end
 		end,
 	})
 
-	daggerTab:Toggle({
-		Title = "Horizontal Aim",
-		Desc = "Face target horizontally during swing",
-		Value = autoAimEnabled,
-		Flag = "AutoAim",
-		Callback = function(v) autoAimEnabled = v end,
-	})
-
 	dsTab:Toggle({
-		Title = "Lunge Assist",
-		Desc = "Backstab insurance on crouch-lunge",
+		Title = "Dashstab",
 		Value = isDashstabEnabled,
 		Flag = "Dashstab",
 		Callback = function(v) isDashstabEnabled = v end,
 	})
 	dsTab:Toggle({
+		Title = "Dashstab Aim",
+		Value = dsAimEnabled,
+		Flag = "DSAim",
+		Callback = function(v) dsAimEnabled = v end,
+	})
+	dsTab:Toggle({
+		Title = "No Crouch Slow",
+		Value = noCrouchSlow,
+		Flag = "NoCrouchSlow",
+		Callback = function(v) noCrouchSlow = v end,
+	})
+	dsTab:Toggle({
+		Title = "Crouch Stun HUD",
+		Value = crouchHudEnabled,
+		Flag = "CrouchHUD",
+		Callback = function(v)
+			crouchHudEnabled = v
+			if not v and stunHudLabel then stunHudLabel.Visible = false end
+		end,
+	})
+	dsTab:Toggle({
 		Title = "Wall Check",
-		Desc = "Require clear line of sight to target",
 		Value = dsWallCheck,
 		Flag = "DSWallCheck",
 		Callback = function(v) dsWallCheck = v end,
 	})
-	dsTab:Toggle({
-		Title = "Proximity Gate",
-		Desc = "Wait until lunge reaches Connect Range",
-		Value = dsProxGate,
-		Flag = "DSProxGate",
-		Callback = function(v) dsProxGate = v end,
-	})
 	dsTab:Input({
-		Title = "Connect Range",
-		Value = tostring(dsProxStuds),
-		InputIcon = "ruler",
-		Flag = "DSProxStuds",
-		Callback = function(t)
-			local n = tonumber(t)
-			if n and n >= 5 then dsProxStuds = n end
-		end,
-	})
-	dsTab:Input({
-		Title = "Lunge Delay",
+		Title = "Start Delay",
 		Value = tostring(dsStartDelay),
 		InputIcon = "timer",
 		Flag = "StartDelay",
@@ -380,14 +327,71 @@ local function buildUI()
 		end,
 	})
 
+	autoTab:Toggle({
+		Title = "Auto Studs",
+		Value = isAutoStudsEnabled,
+		Flag = "AutoStuds",
+		Callback = function(v) isAutoStudsEnabled = v end,
+	})
+	autoTab:Toggle({
+		Title = "Detect Ping",
+		Value = isDetectPingEnabled,
+		Flag = "DetectPing",
+		Callback = function(v) isDetectPingEnabled = v end,
+	})
+	autoTab:Input({
+		Title = "Standing Studs",
+		Value = tostring(autoStandStuds),
+		InputIcon = "person-standing",
+		Flag = "StandStuds",
+		Callback = function(t)
+			local n = tonumber(t)
+			if n and n > 0 then autoStandStuds = n end
+		end,
+	})
+	autoTab:Input({
+		Title = "Running Studs",
+		Value = tostring(autoRunStuds),
+		InputIcon = "footprints",
+		Flag = "RunStuds",
+		Callback = function(t)
+			local n = tonumber(t)
+			if n and n > 0 then autoRunStuds = n end
+		end,
+	})
+	autoTab:Button({
+		Title = "Export Log",
+		Icon = "download",
+		Color = Color3.fromHex("#0369a1"),
+		Justify = "Center",
+		Callback = function()
+			if abttExport then abttExport() end
+		end,
+	})
+
 	uiCanary = Instance.new("ScreenGui")
 	uiCanary.Name = "ABM_V2_CANARY"
 	uiCanary.ResetOnSpawn = false
-	uiCanary.DisplayOrder = -999
+	uiCanary.IgnoreGuiInset = true
+	uiCanary.DisplayOrder = 100
 	local cFrame = Instance.new("Frame")
 	cFrame.Size = UDim2.new(0, 1, 0, 1)
 	cFrame.BackgroundTransparency = 1
 	cFrame.Parent = uiCanary
+	local lbl = Instance.new("TextLabel")
+	lbl.Name = "StunChargeHUD"
+	lbl.AnchorPoint = Vector2.new(0.5, 0.5)
+	lbl.Position = UDim2.fromScale(0.5, 0.58)
+	lbl.Size = UDim2.fromOffset(180, 24)
+	lbl.BackgroundTransparency = 1
+	lbl.Font = Enum.Font.GothamBold
+	lbl.TextSize = 15
+	lbl.TextColor3 = Color3.fromHex("#f0f9ff")
+	lbl.TextStrokeTransparency = 0.2
+	lbl.Text = ""
+	lbl.Visible = false
+	lbl.Parent = uiCanary
+	stunHudLabel = lbl
 	uiCanary.Parent = getGuiParent()
 end
 
@@ -696,6 +700,11 @@ local function runDashstabSequence()
 		end
 	end
 
+	local hum = character:FindFirstChildOfClass("Humanoid")
+	local oldAutoRotate = hum and hum.AutoRotate or nil
+	if dsAimEnabled and hum then
+		pcall(function() hum.AutoRotate = false end)
+	end
 	resetYawPredictor()
 	local ok, err = pcall(function()
 		choreo = nil
@@ -721,6 +730,15 @@ local function runDashstabSequence()
 			local km = abttSeqKiller()
 			local khrp = km and km:FindFirstChild("HumanoidRootPart")
 			if khrp then
+				if dsAimEnabled then
+					pcall(function()
+						local pos = hrp.Position
+						local flatDir = Vector3.new(khrp.Position.X - pos.X, 0, khrp.Position.Z - pos.Z)
+						if flatDir.Magnitude > 0.05 and hrp.CFrame.LookVector:Dot(flatDir.Unit) < 0.99939 then
+							hrp.CFrame = CFrame.lookAt(pos, pos + flatDir.Unit)
+						end
+					end)
+				end
 				local delta = khrp.Position - hrp.Position
 				if dsProxGate and delta.Magnitude > dsProxStuds then
 					canClaim = false
@@ -741,6 +759,7 @@ local function runDashstabSequence()
 	end)
 	choreo = nil
 	doitmate = false
+	finishSequence(hum, oldAutoRotate)
 	if not ok then warn("[ABM] Lunge sequence error: " .. tostring(err)) end
 	task.delay(1.2, function()
 		local hum2 = tKm and tKm.Parent and tKm:FindFirstChildOfClass("Humanoid")
@@ -811,6 +830,20 @@ local function check(hrp1, hrp2, range)
 	return (hrp1.Position - hrp2.Position).Magnitude <= range
 end
 
+local function bindNoSlowMultiplier(v)
+	if not v or not v:IsA("NumberValue") then return end
+	if v.Name == "TwoTimeCrouching" or v.Name == "TwoTimeStab" then
+		if noCrouchSlow and v.Value < 1 then
+			v.Value = 1
+		end
+		keep(v:GetPropertyChangedSignal("Value"):Connect(function()
+			if noCrouchSlow and not abttDead and v.Value < 1 then
+				v.Value = 1
+			end
+		end))
+	end
+end
+
 local function hookCharacter(character)
 	local humanoid = character:WaitForChild("Humanoid", 5)
 	if not humanoid then return end
@@ -824,6 +857,15 @@ local function hookCharacter(character)
 			crouchStartAt = nil
 		end
 	end))
+	task.spawn(function()
+		local multFolder = character:FindFirstChild("SpeedMultipliers") or character:WaitForChild("SpeedMultipliers", 3)
+		if multFolder then
+			for _, child in ipairs(multFolder:GetChildren()) do
+				bindNoSlowMultiplier(child)
+			end
+			keep(multFolder.ChildAdded:Connect(bindNoSlowMultiplier))
+		end
+	end)
 	keep(animator.AnimationPlayed:Connect(function(track)
 		if not track or not track.Animation then return end
 		local id = tostring(track.Animation.AnimationId or ""):gsub("%D", "")
@@ -855,14 +897,27 @@ local lastKillerPos = nil
 local smoothedSpeed = 0
 local speedSampleDt = 0
 
--- Hook into physics steps to calculate Auto Studs based on Position Delta & Ping
+-- Hook into physics steps to calculate Auto Studs & Crouch Stun HUD
 keep(RunService.Heartbeat:Connect(function(dt)
-	-- v1.3.1-tt: fps counter (cho ctx — throttled 0.5s)
 	ABTT_fpsAcc = ABTT_fpsAcc + dt
 	ABTT_fpsN = ABTT_fpsN + 1
 	if os.clock() - ABTT_fpsAt >= 0.5 and ABTT_fpsAcc > 0 then
 		ABTT_fps = math.floor(ABTT_fpsN / ABTT_fpsAcc + 0.5)
 		ABTT_fpsAcc, ABTT_fpsN, ABTT_fpsAt = 0, 0, os.clock()
+	end
+	if crouchHudEnabled and crouchStartAt and stunHudLabel then
+		local elapsed = math.clamp(os.clock() - crouchStartAt, 0, 3.0)
+		local stunVal = 2.0 + 1.5 * (elapsed / 3.0)
+		stunHudLabel.Visible = true
+		if elapsed >= 3.0 then
+			stunHudLabel.Text = "Stun: 3.5s [MAX]"
+			stunHudLabel.TextColor3 = Color3.fromHex("#38bdf8")
+		else
+			stunHudLabel.Text = string.format("Stun: %.1fs (%.1fs)", stunVal, elapsed)
+			stunHudLabel.TextColor3 = Color3.fromHex("#f0f9ff")
+		end
+	elseif stunHudLabel and stunHudLabel.Visible then
+		stunHudLabel.Visible = false
 	end
 	if isAutoStudsEnabled then
 		local killerModel = getFirstValidKillerModel()
